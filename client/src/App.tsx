@@ -13,6 +13,7 @@ import OneOffDocument from "@/pages/one-off-document";
 import MobileSignature from "@/pages/mobile-signature";
 import VerifyEmailPage from "@/pages/verify-email";
 import StorageSettingsPage from "@/pages/storage-settings";
+import AdminPanel from "@/pages/admin-panel";
 
 function Router() {
   return (
@@ -24,6 +25,7 @@ function Router() {
       <Route path="/bulk-import" component={BulkImportPage} />
       <Route path="/documents/new" component={OneOffDocument} />
       <Route path="/storage-settings" component={StorageSettingsPage} />
+      <Route path="/admin" component={AdminPanel} />
       <Route path="/d/:id" component={SigningPage} />
       <Route path="/sign-mobile/:sessionToken" component={MobileSignature} />
       <Route component={NotFound} />

@@ -50,7 +50,7 @@ import { StorageSettings } from "@/components/storage-settings";
 import { TemplatesManagement } from "@/components/templates-management";
 import { ProfileSettings } from "@/components/profile-settings";
 import { SubscriptionManagement } from "@/components/subscription-management";
-import { HardDrive, CreditCard } from "lucide-react";
+import { HardDrive, CreditCard, Crown } from "lucide-react";
 import type { Document, AuditEvent, SignatureAsset } from "@shared/schema";
 
 interface DocumentWithDetails extends Document {
@@ -308,6 +308,17 @@ export default function AdminDashboard() {
               <Upload className="h-4 w-4 mr-1" />
               Bulk Import
             </Button>
+            {user?.isAdmin && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => window.location.href = "/admin"}
+                data-testid="button-nav-admin"
+              >
+                <Crown className="h-4 w-4 mr-1" />
+                Admin Panel
+              </Button>
+            )}
             {user && (
               <div className="flex items-center gap-2">
                 <Avatar className="h-8 w-8">
