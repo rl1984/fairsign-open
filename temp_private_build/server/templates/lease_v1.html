@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Residential Lease Agreement</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 18mm 15mm;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Times New Roman', Times, serif;
+      font-size: 12pt;
+      line-height: 1.6;
+      color: #000;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 24pt;
+      border-bottom: 2px solid #000;
+      padding-bottom: 12pt;
+    }
+    
+    .header h1 {
+      font-size: 18pt;
+      font-weight: bold;
+      margin-bottom: 6pt;
+    }
+    
+    .header p {
+      font-size: 10pt;
+      color: #333;
+    }
+    
+    .section {
+      margin-bottom: 18pt;
+    }
+    
+    .section-title {
+      font-size: 12pt;
+      font-weight: bold;
+      margin-bottom: 8pt;
+      text-transform: uppercase;
+    }
+    
+    .field {
+      display: inline;
+      font-weight: bold;
+      text-decoration: underline;
+    }
+    
+    .paragraph {
+      margin-bottom: 12pt;
+      text-align: justify;
+    }
+    
+    .parties-table {
+      width: 100%;
+      margin-bottom: 18pt;
+    }
+    
+    .parties-table td {
+      padding: 4pt 0;
+      vertical-align: top;
+    }
+    
+    .parties-table .label {
+      width: 120pt;
+      font-weight: bold;
+    }
+    
+    .signature-block {
+      margin-top: 36pt;
+      page-break-inside: avoid;
+    }
+    
+    .signature-line {
+      display: flex;
+      align-items: flex-end;
+      margin-bottom: 18pt;
+    }
+    
+    .signature-box {
+      border: 1px dashed #666;
+      width: 200pt;
+      height: 60pt;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #666;
+      font-size: 10pt;
+      margin-right: 12pt;
+    }
+    
+    .initial-box {
+      border: 1px dashed #666;
+      width: 80pt;
+      height: 40pt;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #666;
+      font-size: 9pt;
+    }
+    
+    .date-line {
+      border-bottom: 1px solid #000;
+      width: 150pt;
+      display: inline-block;
+      margin-left: 8pt;
+    }
+    
+    .page-footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-size: 9pt;
+      color: #666;
+      padding: 6pt;
+    }
+    
+    .initial-section {
+      margin-top: 24pt;
+      padding-top: 12pt;
+      border-top: 1px solid #ccc;
+    }
+    
+    .initial-row {
+      display: flex;
+      align-items: center;
+      gap: 12pt;
+      margin-bottom: 12pt;
+    }
+    
+    .terms-list {
+      margin-left: 24pt;
+      margin-bottom: 12pt;
+    }
+    
+    .terms-list li {
+      margin-bottom: 6pt;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>RESIDENTIAL LEASE AGREEMENT</h1>
+    <p>This agreement is entered into on this date</p>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">1. Parties</div>
+    <table class="parties-table">
+      <tr>
+        <td class="label">Landlord:</td>
+        <td><span class="field">{{landlord_name}}</span></td>
+      </tr>
+      <tr>
+        <td class="label">Landlord Email:</td>
+        <td><span class="field">{{landlord_email}}</span></td>
+      </tr>
+      <tr>
+        <td class="label">Tenant:</td>
+        <td><span class="field">{{tenant_name}}</span></td>
+      </tr>
+      <tr>
+        <td class="label">Tenant Email:</td>
+        <td><span class="field">{{tenant_email}}</span></td>
+      </tr>
+    </table>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">2. Property</div>
+    <p class="paragraph">
+      The Landlord agrees to lease to the Tenant the property located at:
+      <span class="field">{{property_address}}</span>
+      (hereinafter referred to as "the Premises").
+    </p>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">3. Lease Term</div>
+    <p class="paragraph">
+      The lease shall commence on <span class="field">{{lease_start}}</span> and 
+      shall terminate on <span class="field">{{lease_end}}</span>, unless 
+      terminated earlier in accordance with the terms of this Agreement.
+    </p>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">4. Rent</div>
+    <p class="paragraph">
+      The Tenant agrees to pay monthly rent in the amount of 
+      <span class="field">${{rent}}</span> USD, due on the first day of each 
+      month. Rent shall be paid via the method agreed upon by both parties.
+    </p>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">5. Security Deposit</div>
+    <p class="paragraph">
+      Upon execution of this Agreement, the Tenant shall pay a security deposit 
+      equal to one month's rent. This deposit will be held by the Landlord and 
+      returned to the Tenant within 30 days of lease termination, minus any 
+      deductions for damages or unpaid rent.
+    </p>
+  </div>
+  
+  <div class="initial-section">
+    <p style="font-weight: bold; margin-bottom: 12pt;">Tenant Initials - Page 1</p>
+    <div class="initial-row">
+      <div class="initial-box">Initial Here</div>
+      <span>I have read and understood sections 1-5 above.</span>
+    </div>
+  </div>
+  
+  <div style="page-break-before: always;"></div>
+  
+  <div class="section">
+    <div class="section-title">6. Use of Premises</div>
+    <p class="paragraph">
+      The Premises shall be used exclusively for residential purposes. The 
+      Tenant shall not use the Premises for any illegal or commercial purposes 
+      without prior written consent from the Landlord.
+    </p>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">7. Maintenance and Repairs</div>
+    <p class="paragraph">
+      The Tenant agrees to maintain the Premises in good condition and to 
+      promptly notify the Landlord of any necessary repairs. The Landlord 
+      shall be responsible for major repairs and maintenance of structural 
+      elements, plumbing, and electrical systems.
+    </p>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">8. Utilities</div>
+    <p class="paragraph">
+      The Tenant shall be responsible for payment of all utilities including 
+      but not limited to electricity, gas, water, internet, and cable services, 
+      unless otherwise specified in writing.
+    </p>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">9. Rules and Regulations</div>
+    <p class="paragraph">The Tenant agrees to comply with the following:</p>
+    <ul class="terms-list">
+      <li>No smoking inside the Premises</li>
+      <li>Quiet hours from 10:00 PM to 8:00 AM</li>
+      <li>No unauthorized pets without prior written approval</li>
+      <li>No alterations to the Premises without Landlord consent</li>
+      <li>Compliance with all applicable laws and building regulations</li>
+    </ul>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">10. Termination</div>
+    <p class="paragraph">
+      Either party may terminate this Agreement by providing 30 days written 
+      notice prior to the end of any rental period. Early termination by the 
+      Tenant may result in forfeiture of the security deposit.
+    </p>
+  </div>
+  
+  <div class="initial-section">
+    <p style="font-weight: bold; margin-bottom: 12pt;">Tenant Initials - Page 2</p>
+    <div class="initial-row">
+      <div class="initial-box">Initial Here</div>
+      <span>I have read and understood sections 6-10 above.</span>
+    </div>
+  </div>
+  
+  <div class="signature-block">
+    <div class="section-title">11. Signatures</div>
+    <p class="paragraph">
+      By signing below, both parties acknowledge that they have read, 
+      understood, and agree to all terms and conditions of this Residential 
+      Lease Agreement.
+    </p>
+    
+    <div style="margin-top: 24pt;">
+      <p style="font-weight: bold; margin-bottom: 8pt;">Tenant Signature:</p>
+      <div class="signature-line">
+        <div class="signature-box">Sign Here</div>
+        <div>
+          <p><strong>{{tenant_name}}</strong></p>
+          <p>Date: <span class="date-line"></span></p>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+</body>
+</html>
