@@ -1,10 +1,11 @@
 import { useState } from "react";
+import { Link } from "wouter";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { FileText, LogIn, Loader2, ArrowLeft, Shield, Check, FileSignature, Users, Zap, Lock, Globe, UserPlus, Mail } from "lucide-react";
+import { FileText, LogIn, Loader2, ArrowLeft, Shield, Check, FileSignature, Users, Eye, Lock, Globe, UserPlus, Mail, Code } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import heroBackground from "@assets/generated_images/professional_signature_hero_background.png";
@@ -202,9 +203,9 @@ export default function LandingPage() {
       description: "Send documents to multiple signers with custom signing order"
     },
     {
-      icon: Zap,
-      title: "Lightning Fast",
-      description: "Get documents signed in minutes, not days"
+      icon: Eye,
+      title: "Completely Private",
+      description: "End-to-end encryption as standard, or store documents on your own private cloud"
     },
     {
       icon: Globe,
@@ -212,9 +213,9 @@ export default function LandingPage() {
       description: "eSignatures valid across EU, UK, US, and 180+ countries"
     },
     {
-      icon: FileText,
-      title: "Template Library",
-      description: "Create and reuse templates for recurring documents"
+      icon: Code,
+      title: "Open Source",
+      description: <>Our software is open source, install and use it for free forever by <a href="https://github.com/rl1984/fairsign-open" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">visiting our Git</a></>
     }
   ];
 
@@ -237,7 +238,6 @@ export default function LandingPage() {
           </div>
         </div>
       </header>
-
       <section 
         className="relative w-full py-16 sm:py-24 lg:py-32 overflow-hidden"
         style={{
@@ -270,7 +270,6 @@ export default function LandingPage() {
           </div>
         </div>
       </section>
-
       <section className="w-full py-12 sm:py-16 lg:py-20 bg-muted/50">
         <div className="container mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-10 sm:mb-12 lg:mb-16">
@@ -292,7 +291,6 @@ export default function LandingPage() {
           </div>
         </div>
       </section>
-
       <section className="w-full py-12 sm:py-16 lg:py-20" id="pricing">
         <div className="container mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-10 sm:mb-12 lg:mb-16">
@@ -301,18 +299,18 @@ export default function LandingPage() {
               Start free, pay only when you need more. No surprises, no hidden fees.
             </p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8 max-w-4xl mx-auto">
-            <Card className="border-2 relative">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 sm:gap-8 max-w-6xl mx-auto">
+            <Card className="border-2 relative flex flex-col">
               <CardHeader className="pb-4">
                 <CardTitle className="text-xl sm:text-2xl">Free</CardTitle>
                 <CardDescription className="text-base sm:text-lg">Perfect for personal use</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
+              <CardContent className="flex flex-col flex-1 gap-4">
                 <div className="flex items-baseline gap-1">
                   <span className="text-4xl sm:text-5xl font-bold">€0</span>
-                  <span className="text-muted-foreground">/month</span>
+                  <span className="text-muted-foreground">/user/month</span>
                 </div>
-                <ul className="space-y-2 sm:space-y-3">
+                <ul className="space-y-2 sm:space-y-3 flex-1">
                   <li className="flex items-center gap-2 text-sm sm:text-base">
                     <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
                     <span><strong>5 documents</strong> per month</span>
@@ -333,14 +331,18 @@ export default function LandingPage() {
                     <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
                     Audit trail
                   </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Encrypted document storage
+                  </li>
                 </ul>
-                <Button variant="outline" className="w-full mt-4" onClick={() => setAuthMode("signup")} data-testid="pricing-free-signup-button">
+                <Button variant="outline" className="w-full" onClick={() => setAuthMode("signup")} data-testid="pricing-free-signup-button">
                   Get Started Free
                 </Button>
               </CardContent>
             </Card>
 
-            <Card className="border-2 border-primary relative overflow-hidden">
+            <Card className="border-2 border-primary relative overflow-hidden flex flex-col">
               <div className="absolute top-0 right-0 bg-primary text-primary-foreground px-3 py-1 text-xs sm:text-sm font-medium">
                 Best Value
               </div>
@@ -348,13 +350,12 @@ export default function LandingPage() {
                 <CardTitle className="text-xl sm:text-2xl">Pro</CardTitle>
                 <CardDescription className="text-base sm:text-lg">For growing businesses</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
+              <CardContent className="flex flex-col flex-1 gap-4">
                 <div className="flex items-baseline gap-1">
                   <span className="text-4xl sm:text-5xl font-bold">€5</span>
-                  <span className="text-muted-foreground">/month</span>
-                  <span className="text-xs sm:text-sm text-muted-foreground ml-2">($6 USD)</span>
+                  <span className="text-muted-foreground">/user/month + VAT</span>
                 </div>
-                <ul className="space-y-2 sm:space-y-3">
+                <ul className="space-y-2 sm:space-y-3 flex-1">
                   <li className="flex items-center gap-2 text-sm sm:text-base">
                     <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
                     <span><strong>Unlimited documents</strong></span>
@@ -375,19 +376,78 @@ export default function LandingPage() {
                     <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
                     Invite team
                   </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Encrypted document storage
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Private cloud storage
+                  </li>
                 </ul>
-                <Button className="w-full mt-4" onClick={() => setAuthMode("signup")} data-testid="pricing-pro-signup-button">
+                <Button className="w-full" onClick={() => setAuthMode("signup")} data-testid="pricing-pro-signup-button">
                   Start Pro Trial
                 </Button>
               </CardContent>
             </Card>
+
+            <Card className="border-2 relative flex flex-col">
+              <CardHeader className="pb-4">
+                <CardTitle className="text-xl sm:text-2xl">Enterprise</CardTitle>
+                <CardDescription className="text-base sm:text-lg">For Professional Services Firms</CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col flex-1 gap-4">
+                <div className="flex items-baseline gap-1">
+                  <span className="text-4xl sm:text-5xl font-bold">€275</span>
+                  <span className="text-muted-foreground">/org/month + VAT</span>
+                </div>
+                <ul className="space-y-2 sm:space-y-3 flex-1">
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    <span><strong>Unlimited documents</strong></span>
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    No watermarks
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Unlimited signers
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Audit trail
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Use your domain
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Encrypted document storage
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    Private cloud storage
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    <span><strong>Org. wide access (limit 100 users)</strong></span>
+                  </li>
+                  <li className="flex items-center gap-2 text-sm sm:text-base">
+                    <Check className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
+                    <span><strong>API access</strong></span>
+                  </li>
+                </ul>
+                <Button variant="outline" className="w-full" onClick={() => setAuthMode("signup")} data-testid="pricing-enterprise-signup-button">
+                  Contact Sales
+                </Button>
+              </CardContent>
+            </Card>
           </div>
-          <p className="text-center text-muted-foreground mt-6 sm:mt-8 text-sm sm:text-base">
-            Compare us to DocuSign at $25/month or Adobe Sign at $15/month. We're so much cheaper!
-          </p>
+          <p className="text-center text-muted-foreground mt-6 sm:mt-8 text-sm sm:text-base">Our prices are up to 80% cheaper than our competitors because instead of charging you for AI features you don't need, we use AI to reduce our operating costs, passing the savings directly to you.</p>
         </div>
       </section>
-
       <section className="w-full py-12 sm:py-16 lg:py-20 bg-muted/50">
         <div className="container mx-auto px-4 sm:px-6 lg:px-8 text-center">
           <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold mb-4 sm:mb-6">Ready to Get Started?</h2>
@@ -400,7 +460,6 @@ export default function LandingPage() {
           </Button>
         </div>
       </section>
-
       <footer className="py-6 sm:py-8 px-4 text-center border-t bg-background">
         <div className="container mx-auto">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
@@ -408,13 +467,24 @@ export default function LandingPage() {
               <FileText className="h-5 w-5 text-primary" />
               <span className="font-semibold">FairSign.io</span>
             </div>
-            <p className="text-sm text-muted-foreground">
-              &copy; {new Date().getFullYear()} FairSign.io. All Rights Reserved.
-            </p>
+            <div className="flex items-center gap-4 flex-wrap">
+              <Link href="/terms">
+                <span className="text-sm text-muted-foreground hover:text-foreground cursor-pointer" data-testid="link-terms-of-service">
+                  Terms of Service
+                </span>
+              </Link>
+              <Link href="/privacy">
+                <span className="text-sm text-muted-foreground hover:text-foreground cursor-pointer" data-testid="link-privacy-policy">
+                  Privacy Policy
+                </span>
+              </Link>
+              <p className="text-sm text-muted-foreground">
+                &copy; {new Date().getFullYear()} FairSign.io. All Rights Reserved.
+              </p>
+            </div>
           </div>
         </div>
       </footer>
-
       {authMode !== "none" && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={(e) => e.target === e.currentTarget && resetAuth()}>
           <Card className="w-full max-w-md relative animate-in fade-in zoom-in-95 duration-200">

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/use-auth";
@@ -43,6 +43,10 @@ import {
   Download,
   FileCheck,
   Search,
+  Percent,
+  Trash2,
+  ToggleLeft,
+  ToggleRight,
 } from "lucide-react";
 import UserManagement from "@/components/user-management";
 import TwoFactorSetup from "@/components/two-factor-setup";
@@ -50,8 +54,378 @@ import { StorageSettings } from "@/components/storage-settings";
 import { TemplatesManagement } from "@/components/templates-management";
 import { ProfileSettings } from "@/components/profile-settings";
 import { SubscriptionManagement } from "@/components/subscription-management";
-import { HardDrive, CreditCard, Crown } from "lucide-react";
+import { HardDrive, CreditCard, Crown, Zap, Sparkles, TrendingUp, DollarSign } from "lucide-react";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
 import type { Document, AuditEvent, SignatureAsset } from "@shared/schema";
+
+// Admin analytics types
+interface AdminStats {
+  totalUsers: number;
+  freeUsers: number;
+  proUsers: number;
+  totalDocuments: number;
+  userGrowth: { date: string; count: number }[];
+  documentGrowth: { date: string; count: number }[];
+  monthlyRevenue: number;
+  arr: number;
+}
+
+interface AdminSettingsData {
+  id: string | null;
+  displayCurrency: string;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  EUR: "€",
+  USD: "$",
+  GBP: "£",
+};
+
+function formatCurrency(amount: number, currency: string): string {
+  const symbol = CURRENCY_SYMBOLS[currency] || currency;
+  return `${symbol}${amount.toLocaleString()}`;
+}
+
+// Admin StatCard component
+function StatCard({ 
+  title, 
+  value, 
+  description, 
+  icon: Icon 
+}: { 
+  title: string; 
+  value: string | number; 
+  description?: string; 
+  icon: any 
+}) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-bold" data-testid={`stat-${title.toLowerCase().replace(/\s/g, '-')}`}>
+          {value}
+        </div>
+        {description && (
+          <p className="text-xs text-muted-foreground">{description}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Admin GrowthChart component
+function GrowthChart({ 
+  data, 
+  title, 
+  dataKey = "count",
+  color = "hsl(var(--primary))"
+}: { 
+  data: { date: string; count: number }[]; 
+  title: string;
+  dataKey?: string;
+  color?: string;
+}) {
+  const chartData = data.map(d => ({
+    ...d,
+    date: new Date(d.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  }));
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="h-[200px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+              <XAxis 
+                dataKey="date" 
+                fontSize={12} 
+                tickLine={false}
+                axisLine={false}
+              />
+              <YAxis 
+                fontSize={12} 
+                tickLine={false}
+                axisLine={false}
+              />
+              <Tooltip 
+                contentStyle={{
+                  backgroundColor: 'hsl(var(--card))',
+                  border: '1px solid hsl(var(--border))',
+                  borderRadius: '6px',
+                }}
+              />
+              <Area 
+                type="monotone" 
+                dataKey={dataKey} 
+                stroke={color}
+                fill={color}
+                fillOpacity={0.2}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+type TimeRange = "7d" | "30d" | "90d" | "1y" | "all";
+type ChartMode = "daily" | "cumulative";
+
+function UserGrowthChart({ 
+  color = "hsl(var(--primary))"
+}: { 
+  color?: string;
+}) {
+  const [timeRange, setTimeRange] = useState<TimeRange>("30d");
+  const [chartMode, setChartMode] = useState<ChartMode>("daily");
+
+  const { data: growthData, isLoading } = useQuery<{ date: string; count: number }[]>({
+    queryKey: ['/api/ee/admin/user-growth', { timeRange }],
+    queryFn: () => fetch(`/api/ee/admin/user-growth?timeRange=${timeRange}`).then(res => res.json()),
+  });
+
+  const chartData = (growthData || []).map((d, index, arr) => {
+    const formattedDate = new Date(d.date).toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: timeRange === "1y" || timeRange === "all" ? '2-digit' : undefined
+    });
+    
+    if (chartMode === "cumulative") {
+      const cumulativeCount = arr.slice(0, index + 1).reduce((sum, item) => sum + item.count, 0);
+      return { date: formattedDate, count: cumulativeCount };
+    }
+    return { date: formattedDate, count: d.count };
+  });
+
+  const timeRangeLabels: Record<TimeRange, string> = {
+    "7d": "7 Days",
+    "30d": "30 Days", 
+    "90d": "90 Days",
+    "1y": "1 Year",
+    "all": "All Time",
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <CardTitle className="text-base">User Growth</CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Select value={timeRange} onValueChange={(val) => setTimeRange(val as TimeRange)}>
+              <SelectTrigger className="w-[110px]" data-testid="select-time-range">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="7d">7 Days</SelectItem>
+                <SelectItem value="30d">30 Days</SelectItem>
+                <SelectItem value="90d">90 Days</SelectItem>
+                <SelectItem value="1y">1 Year</SelectItem>
+                <SelectItem value="all">All Time</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={chartMode} onValueChange={(val) => setChartMode(val as ChartMode)}>
+              <SelectTrigger className="w-[120px]" data-testid="select-chart-mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="daily">Daily</SelectItem>
+                <SelectItem value="cumulative">Cumulative</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {chartMode === "cumulative" ? "Total users over time" : "New users per day"} ({timeRangeLabels[timeRange]})
+        </p>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="h-[200px] flex items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : chartData.length === 0 ? (
+          <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+            No data available
+          </div>
+        ) : (
+          <div className="h-[200px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                <XAxis 
+                  dataKey="date" 
+                  fontSize={10} 
+                  tickLine={false}
+                  axisLine={false}
+                  interval="preserveStartEnd"
+                />
+                <YAxis 
+                  fontSize={12} 
+                  tickLine={false}
+                  axisLine={false}
+                  allowDecimals={false}
+                />
+                <Tooltip 
+                  contentStyle={{
+                    backgroundColor: 'hsl(var(--card))',
+                    border: '1px solid hsl(var(--border))',
+                    borderRadius: '6px',
+                  }}
+                  formatter={(value: number) => [value, chartMode === "cumulative" ? "Total Users" : "New Users"]}
+                />
+                <Area 
+                  type="monotone" 
+                  dataKey="count" 
+                  stroke={color}
+                  fill={color}
+                  fillOpacity={0.2}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DocumentCompletionChart({ 
+  color = "hsl(142 76% 36%)"
+}: { 
+  color?: string;
+}) {
+  const [timeRange, setTimeRange] = useState<TimeRange>("30d");
+  const [chartMode, setChartMode] = useState<ChartMode>("daily");
+
+  const { data: completionData, isLoading } = useQuery<{ date: string; count: number }[]>({
+    queryKey: ['/api/ee/admin/document-completion', { timeRange }],
+    queryFn: () => fetch(`/api/ee/admin/document-completion?timeRange=${timeRange}`).then(res => res.json()),
+  });
+
+  const chartData = (completionData || []).map((d, index, arr) => {
+    const formattedDate = new Date(d.date).toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: timeRange === "1y" || timeRange === "all" ? '2-digit' : undefined
+    });
+    
+    if (chartMode === "cumulative") {
+      const cumulativeCount = arr.slice(0, index + 1).reduce((sum, item) => sum + item.count, 0);
+      return { date: formattedDate, count: cumulativeCount };
+    }
+    return { date: formattedDate, count: d.count };
+  });
+
+  const timeRangeLabels: Record<TimeRange, string> = {
+    "7d": "7 Days",
+    "30d": "30 Days", 
+    "90d": "90 Days",
+    "1y": "1 Year",
+    "all": "All Time",
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <CardTitle className="text-base">Documents Signed</CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Select value={timeRange} onValueChange={(val) => setTimeRange(val as TimeRange)}>
+              <SelectTrigger className="w-[110px]" data-testid="select-doc-time-range">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="7d">7 Days</SelectItem>
+                <SelectItem value="30d">30 Days</SelectItem>
+                <SelectItem value="90d">90 Days</SelectItem>
+                <SelectItem value="1y">1 Year</SelectItem>
+                <SelectItem value="all">All Time</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={chartMode} onValueChange={(val) => setChartMode(val as ChartMode)}>
+              <SelectTrigger className="w-[120px]" data-testid="select-doc-chart-mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="daily">Daily</SelectItem>
+                <SelectItem value="cumulative">Cumulative</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {chartMode === "cumulative" ? "Total documents signed" : "Documents signed per day"} ({timeRangeLabels[timeRange]})
+        </p>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="h-[200px] flex items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : chartData.length === 0 ? (
+          <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+            No data available
+          </div>
+        ) : (
+          <div className="h-[200px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                <XAxis 
+                  dataKey="date" 
+                  fontSize={10} 
+                  tickLine={false}
+                  axisLine={false}
+                  interval="preserveStartEnd"
+                />
+                <YAxis 
+                  fontSize={12} 
+                  tickLine={false}
+                  axisLine={false}
+                  allowDecimals={false}
+                />
+                <Tooltip 
+                  contentStyle={{
+                    backgroundColor: 'hsl(var(--card))',
+                    border: '1px solid hsl(var(--border))',
+                    borderRadius: '6px',
+                  }}
+                  formatter={(value: number) => [value, chartMode === "cumulative" ? "Total Signed" : "Signed"]}
+                />
+                <Area 
+                  type="monotone" 
+                  dataKey="count" 
+                  stroke={color}
+                  fill={color}
+                  fillOpacity={0.2}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 interface DocumentWithDetails extends Document {
   signatureAssets?: SignatureAsset[];
@@ -87,11 +461,334 @@ function formatDate(date: string | Date) {
   });
 }
 
+interface PromoCampaign {
+  id: string;
+  code: string;
+  description: string | null;
+  percentOff: number;
+  maxRedemptions: number | null;
+  currentRedemptions: number;
+  expiresAt: string | null;
+  isActive: boolean;
+  stripeCouponId: string | null;
+  stripePromoCodeId: string | null;
+  createdAt: string;
+  stripeRedemptions?: number;
+  stripeActive?: boolean;
+}
+
+function PromoCodesManagement() {
+  const { toast } = useToast();
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const [newCode, setNewCode] = useState("");
+  const [newDescription, setNewDescription] = useState("");
+  const [newPercentOff, setNewPercentOff] = useState("10");
+  const [newMaxRedemptions, setNewMaxRedemptions] = useState("");
+  const [newExpiresAt, setNewExpiresAt] = useState("");
+
+  const { data: promoCodes, isLoading, refetch } = useQuery<PromoCampaign[]>({
+    queryKey: ["/api/ee/admin/promo-codes"],
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async (data: {
+      code: string;
+      description: string;
+      percentOff: number;
+      maxRedemptions?: number;
+      expiresAt?: string;
+    }) => {
+      return apiRequest("POST", "/api/ee/admin/promo-codes", data);
+    },
+    onSuccess: () => {
+      toast({ title: "Promo code created successfully" });
+      setIsCreateDialogOpen(false);
+      resetForm();
+      refetch();
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to create promo code",
+        description: error.message || "An error occurred",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: async ({ id, isActive }: { id: string; isActive: boolean }) => {
+      return apiRequest("PATCH", `/api/ee/admin/promo-codes/${id}`, { isActive });
+    },
+    onSuccess: () => {
+      toast({ title: "Promo code updated" });
+      refetch();
+    },
+    onError: () => {
+      toast({ title: "Failed to update promo code", variant: "destructive" });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      return apiRequest("DELETE", `/api/ee/admin/promo-codes/${id}`);
+    },
+    onSuccess: () => {
+      toast({ title: "Promo code deleted" });
+      refetch();
+    },
+    onError: () => {
+      toast({ title: "Failed to delete promo code", variant: "destructive" });
+    },
+  });
+
+  const resetForm = () => {
+    setNewCode("");
+    setNewDescription("");
+    setNewPercentOff("10");
+    setNewMaxRedemptions("");
+    setNewExpiresAt("");
+  };
+
+  const handleCreate = () => {
+    if (!newCode || newCode.length < 3) {
+      toast({ title: "Code must be at least 3 characters", variant: "destructive" });
+      return;
+    }
+    const percentOff = parseInt(newPercentOff);
+    if (isNaN(percentOff) || percentOff < 1 || percentOff > 100) {
+      toast({ title: "Percent off must be between 1 and 100", variant: "destructive" });
+      return;
+    }
+
+    createMutation.mutate({
+      code: newCode.toUpperCase(),
+      description: newDescription,
+      percentOff,
+      maxRedemptions: newMaxRedemptions ? parseInt(newMaxRedemptions) : undefined,
+      expiresAt: newExpiresAt || undefined,
+    });
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 pb-4">
+        <div>
+          <CardTitle>Promo Codes</CardTitle>
+          <CardDescription>Create and manage discount codes for subscriptions</CardDescription>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh-promos">
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+          <Button size="sm" onClick={() => setIsCreateDialogOpen(true)} data-testid="button-create-promo">
+            <Plus className="h-4 w-4 mr-2" />
+            New Promo Code
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : !promoCodes || promoCodes.length === 0 ? (
+          <div className="text-center py-8">
+            <Percent className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            <p className="text-muted-foreground">No promo codes yet</p>
+            <p className="text-sm text-muted-foreground mt-1">Create your first promo code to offer discounts</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {promoCodes.map((promo) => (
+              <div
+                key={promo.id}
+                className="flex items-center justify-between p-4 border rounded-md"
+                data-testid={`promo-row-${promo.id}`}
+              >
+                <div className="flex items-center gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-semibold text-lg" data-testid={`promo-code-${promo.id}`}>
+                        {promo.code}
+                      </span>
+                      <Badge variant={promo.isActive ? "default" : "secondary"}>
+                        {promo.isActive ? "Active" : "Inactive"}
+                      </Badge>
+                      <Badge variant="outline">{promo.percentOff}% off</Badge>
+                    </div>
+                    <div className="text-sm text-muted-foreground mt-1">
+                      {promo.description && <span>{promo.description} | </span>}
+                      <span>
+                        {promo.stripeRedemptions ?? promo.currentRedemptions} redemptions
+                        {promo.maxRedemptions && ` / ${promo.maxRedemptions} max`}
+                      </span>
+                      {promo.expiresAt && (
+                        <span> | Expires: {new Date(promo.expiresAt).toLocaleDateString()}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => toggleMutation.mutate({ id: promo.id, isActive: !promo.isActive })}
+                    disabled={toggleMutation.isPending}
+                    data-testid={`button-toggle-promo-${promo.id}`}
+                  >
+                    {promo.isActive ? (
+                      <ToggleRight className="h-5 w-5 text-green-600" />
+                    ) : (
+                      <ToggleLeft className="h-5 w-5 text-muted-foreground" />
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      if (confirm(`Are you sure you want to delete promo code "${promo.code}"?`)) {
+                        deleteMutation.mutate(promo.id);
+                      }
+                    }}
+                    disabled={deleteMutation.isPending}
+                    data-testid={`button-delete-promo-${promo.id}`}
+                  >
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Create Promo Code</DialogTitle>
+              <DialogDescription>
+                Create a new discount code for subscriptions. The code will be synced with Stripe.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="promo-code">Code</Label>
+                <Input
+                  id="promo-code"
+                  placeholder="SUMMER2025"
+                  value={newCode}
+                  onChange={(e) => setNewCode(e.target.value.toUpperCase())}
+                  data-testid="input-promo-code"
+                />
+                <p className="text-xs text-muted-foreground">Minimum 3 characters, will be uppercase</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="promo-description">Description (optional)</Label>
+                <Input
+                  id="promo-description"
+                  placeholder="Summer promotion discount"
+                  value={newDescription}
+                  onChange={(e) => setNewDescription(e.target.value)}
+                  data-testid="input-promo-description"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="promo-percent">Discount Percentage</Label>
+                <Input
+                  id="promo-percent"
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={newPercentOff}
+                  onChange={(e) => setNewPercentOff(e.target.value)}
+                  data-testid="input-promo-percent"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="promo-max">Max Redemptions (optional)</Label>
+                <Input
+                  id="promo-max"
+                  type="number"
+                  min="1"
+                  placeholder="Unlimited"
+                  value={newMaxRedemptions}
+                  onChange={(e) => setNewMaxRedemptions(e.target.value)}
+                  data-testid="input-promo-max"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="promo-expires">Expiration Date (optional)</Label>
+                <Input
+                  id="promo-expires"
+                  type="date"
+                  value={newExpiresAt}
+                  onChange={(e) => setNewExpiresAt(e.target.value)}
+                  data-testid="input-promo-expires"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-4">
+                <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleCreate} disabled={createMutation.isPending} data-testid="button-submit-promo">
+                  {createMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  ) : (
+                    <Plus className="h-4 w-4 mr-2" />
+                  )}
+                  Create
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AdminDashboard() {
   const [, setLocation] = useLocation();
   const { user, isLoading: authLoading, isAuthenticated } = useAuth();
   const { toast } = useToast();
-  const [activeTab, setActiveTab] = useState("documents");
+  
+  // Tab state management - robust approach
+  // Track user's explicit tab selection
+  const [selectedTab, setSelectedTab] = useState<string | null>(null);
+  // Track last known role to prevent flicker during auth refresh
+  const [lastKnownRole, setLastKnownRole] = useState<boolean | null>(null);
+  // Track if role has ever been initialized (prevents showing wrong tabs on initial load)
+  const [roleInitialized, setRoleInitialized] = useState(false);
+  
+  // Update lastKnownRole when user data is available, reset tab selection on role change
+  useEffect(() => {
+    if (user) {
+      if (lastKnownRole !== null && lastKnownRole !== user.isAdmin) {
+        // Role changed - reset selection to force default for new role
+        setSelectedTab(null);
+      }
+      setLastKnownRole(user.isAdmin);
+      setRoleInitialized(true);
+    }
+  }, [user, lastKnownRole]);
+  
+  // Compute the resolved tab based on user role and selection
+  const getDefaultTabForRole = (isAdmin: boolean) => isAdmin ? "overview" : "documents";
+  
+  // Use lastKnownRole as fallback during auth refresh to prevent flicker
+  // Only use fallback after role has been initialized once
+  const effectiveRole = user?.isAdmin ?? (roleInitialized ? lastKnownRole : null) ?? false;
+  const resolvedTab = selectedTab ?? getDefaultTabForRole(effectiveRole);
+  
+  // Show loader until role is initialized for the first time
+  // This prevents admins from ever seeing document tabs on initial load
+  const showTabsLoader = !roleInitialized;
+  
+  // Update handler that tracks user selection
+  const handleTabChange = (tab: string) => {
+    setSelectedTab(tab);
+  };
+  
   const [selectedDocument, setSelectedDocument] = useState<DocumentWithDetails | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [documentFilter, setDocumentFilter] = useState<"active" | "completed" | "archived">("active");
@@ -108,6 +805,55 @@ export default function AdminDashboard() {
   const [emailRecipient, setEmailRecipient] = useState("");
   const [emailRecipientName, setEmailRecipientName] = useState("");
   const [isSendingEmail, setIsSendingEmail] = useState(false);
+
+  // Fetch subscription status
+  interface SubscriptionStatus {
+    accountType: string;
+    subscriptionStatus: string | null;
+    documentsUsed: number;
+    documentLimit: number;
+    canCreateDocument: boolean;
+  }
+  
+  const { data: subscription } = useQuery<SubscriptionStatus>({
+    queryKey: ["/api/subscription/status"],
+    enabled: isAuthenticated,
+  });
+
+  const isPro = subscription?.accountType === "pro";
+
+  // Admin-only queries for analytics and settings
+  const { data: adminStats, isLoading: statsLoading } = useQuery<AdminStats>({
+    queryKey: ["/api/ee/admin/stats"],
+    enabled: isAuthenticated && effectiveRole,
+  });
+
+  const { data: adminSettings } = useQuery<AdminSettingsData>({
+    queryKey: ["/api/ee/admin/settings"],
+    enabled: isAuthenticated && effectiveRole,
+  });
+
+  const displayCurrency = adminSettings?.displayCurrency || "EUR";
+
+  const updateSettingsMutation = useMutation({
+    mutationFn: async (data: { displayCurrency: string }) => {
+      return apiRequest("PATCH", "/api/ee/admin/settings", data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ee/admin/settings"] });
+      toast({
+        title: "Settings Updated",
+        description: "Admin settings have been saved.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
 
   // Fetch documents for the authenticated user
   const { data: documents, isLoading: docsLoading, refetch: refetchDocs } = useQuery<Document[]>({
@@ -299,24 +1045,15 @@ export default function AdminDashboard() {
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => window.location.href = "/bulk-import"}
-              data-testid="button-nav-bulk-import"
-            >
-              <Upload className="h-4 w-4 mr-1" />
-              Bulk Import
-            </Button>
-            {user?.isAdmin && (
+            {isPro && (
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => window.location.href = "/admin"}
-                data-testid="button-nav-admin"
+                onClick={() => window.location.href = "/bulk-import"}
+                data-testid="button-nav-bulk-import"
               >
-                <Crown className="h-4 w-4 mr-1" />
-                Admin Panel
+                <Upload className="h-4 w-4 mr-1" />
+                Bulk Import
               </Button>
             )}
             {user && (
@@ -348,77 +1085,145 @@ export default function AdminDashboard() {
 
       {/* Main content */}
       <main className="max-w-6xl mx-auto px-4 py-6">
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
+        {/* Upgrade Banner for Free Users - hidden for admin accounts */}
+        {!isPro && subscription && !effectiveRole && (
+          <Card className="mb-6 border-primary/30 bg-gradient-to-r from-primary/5 to-primary/10">
+            <CardContent className="py-4">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-full bg-primary/10 p-2">
+                    <Sparkles className="h-5 w-5 text-primary" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-base">Upgrade to Pro for Unlimited Documents</h3>
+                    <p className="text-sm text-muted-foreground mt-0.5">
+                      You have {Math.max(0, 5 - (subscription?.documentsUsed ?? 0))} of 5 free documents remaining this month. 
+                      Upgrade for unlimited documents, bulk import, and more.
+                    </p>
+                  </div>
+                </div>
+                <Button 
+                  onClick={() => handleTabChange("subscription")}
+                  className="shrink-0"
+                  data-testid="button-upgrade-banner"
+                >
+                  <Zap className="h-4 w-4 mr-2" />
+                  Upgrade Now
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {showTabsLoader ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+        <Tabs value={resolvedTab} onValueChange={handleTabChange}>
           <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
             <TabsList>
-              <TabsTrigger value="documents" data-testid="tab-documents">
-                <FileText className="h-4 w-4 mr-2" />
-                Documents
-              </TabsTrigger>
-              <TabsTrigger value="templates" data-testid="tab-templates">
-                <FileCode className="h-4 w-4 mr-2" />
-                Templates
-              </TabsTrigger>
-              {user?.isAdmin && (
+              {/* Document tabs - hidden for admin users who can't create documents */}
+              {!effectiveRole && (
+                <>
+                  <TabsTrigger value="documents" data-testid="tab-documents">
+                    <FileText className="h-4 w-4 mr-2" />
+                    Documents
+                  </TabsTrigger>
+                  <TabsTrigger value="templates" data-testid="tab-templates">
+                    <FileCode className="h-4 w-4 mr-2" />
+                    Templates
+                  </TabsTrigger>
+                </>
+              )}
+              {/* Admin-only tabs */}
+              {effectiveRole && (
+                <TabsTrigger value="overview" data-testid="tab-overview">
+                  <TrendingUp className="h-4 w-4 mr-2" />
+                  Overview
+                </TabsTrigger>
+              )}
+              {effectiveRole && (
                 <TabsTrigger value="users" data-testid="tab-users">
                   <Users className="h-4 w-4 mr-2" />
                   Users
                 </TabsTrigger>
               )}
-              <TabsTrigger value="subscription" data-testid="tab-subscription">
-                <CreditCard className="h-4 w-4 mr-2" />
-                Account
-              </TabsTrigger>
-              <TabsTrigger value="settings" data-testid="tab-settings">
-                <Settings className="h-4 w-4 mr-2" />
-                Settings
-              </TabsTrigger>
-              {user?.isAdmin && (
+              {effectiveRole && (
+                <TabsTrigger value="promo-codes" data-testid="tab-promo-codes">
+                  <Percent className="h-4 w-4 mr-2" />
+                  Promo Codes
+                </TabsTrigger>
+              )}
+              {effectiveRole && (
                 <TabsTrigger value="storage" data-testid="tab-storage">
                   <HardDrive className="h-4 w-4 mr-2" />
                   Storage
                 </TabsTrigger>
               )}
+              {effectiveRole && (
+                <TabsTrigger value="admin-settings" data-testid="tab-admin-settings">
+                  <Settings className="h-4 w-4 mr-2" />
+                  Settings
+                </TabsTrigger>
+              )}
+              {!effectiveRole && (
+                <TabsTrigger value="subscription" data-testid="tab-subscription">
+                  <CreditCard className="h-4 w-4 mr-2" />
+                  Account
+                </TabsTrigger>
+              )}
+              {!effectiveRole && (
+                <TabsTrigger value="settings" data-testid="tab-settings">
+                  <Settings className="h-4 w-4 mr-2" />
+                  Settings
+                </TabsTrigger>
+              )}
             </TabsList>
 
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => refetchDocs()}
-                data-testid="button-refresh"
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Refresh
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => setLocation("/documents/new")}
-                data-testid="button-new-document"
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                New Document
-              </Button>
-            </div>
+            {/* Action buttons - only show for non-admin users */}
+            {!effectiveRole && (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => refetchDocs()}
+                  data-testid="button-refresh"
+                >
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Refresh
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => setLocation("/documents/new")}
+                  data-testid="button-new-document"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  New Document
+                </Button>
+              </div>
+            )}
           </div>
 
-          <TabsContent value="documents">
-            {docsLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-              </div>
-            ) : !documents || documents.length === 0 ? (
-              <Card>
-                <CardContent className="flex flex-col items-center justify-center py-12">
-                  <FileText className="h-12 w-12 text-muted-foreground mb-4" />
-                  <p className="text-muted-foreground mb-4">No documents yet</p>
-                  <Button onClick={() => setLocation("/documents/new")} data-testid="button-create-first">
-                    <Plus className="h-4 w-4 mr-2" />
-                    Create Your First Document
-                  </Button>
-                </CardContent>
-              </Card>
-            ) : (
+          {/* Documents tab - only render for non-admin users */}
+          {!effectiveRole && (
+            <TabsContent value="documents">
+              {docsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                </div>
+              ) : !documents || documents.length === 0 ? (
+                <Card>
+                  <CardContent className="flex flex-col items-center justify-center py-12">
+                    <FileText className="h-12 w-12 text-muted-foreground mb-4" />
+                    <p className="text-muted-foreground mb-4">No documents yet</p>
+                    <Button onClick={() => setLocation("/documents/new")} data-testid="button-create-first">
+                      <Plus className="h-4 w-4 mr-2" />
+                      Create Your First Document
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : (
               <div className="space-y-4">
                 <div className="flex items-center gap-2 mb-4 flex-wrap">
                   <div className="relative flex-1 min-w-[200px] max-w-sm">
@@ -648,43 +1453,143 @@ export default function AdminDashboard() {
                 ))}
               </div>
             )}
-          </TabsContent>
+            </TabsContent>
+          )}
 
-          <TabsContent value="templates">
-            <TemplatesManagement />
-          </TabsContent>
+          {/* Templates tab - only render for non-admin users */}
+          {!effectiveRole && (
+            <TabsContent value="templates">
+              <TemplatesManagement />
+            </TabsContent>
+          )}
 
-          {user?.isAdmin && (
+          {/* Overview tab - admin analytics dashboard */}
+          {effectiveRole && (
+            <TabsContent value="overview" className="space-y-6">
+              {statsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                </div>
+              ) : (
+                <>
+                  <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                    <StatCard 
+                      title="Total Users" 
+                      value={adminStats?.totalUsers || 0}
+                      icon={Users}
+                      description={`${adminStats?.freeUsers || 0} free, ${adminStats?.proUsers || 0} pro`}
+                    />
+                    <StatCard 
+                      title="Total Documents" 
+                      value={adminStats?.totalDocuments || 0}
+                      icon={FileText}
+                    />
+                    <StatCard 
+                      title="Monthly Revenue" 
+                      value={formatCurrency(adminStats?.monthlyRevenue || 0, displayCurrency)}
+                      icon={DollarSign}
+                    />
+                    <StatCard 
+                      title="Annual Revenue (ARR)" 
+                      value={formatCurrency(adminStats?.arr || 0, displayCurrency)}
+                      icon={TrendingUp}
+                    />
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <UserGrowthChart color="hsl(var(--primary))" />
+                    <DocumentCompletionChart color="hsl(142 76% 36%)" />
+                  </div>
+                </>
+              )}
+            </TabsContent>
+          )}
+
+          {effectiveRole && (
             <TabsContent value="users">
               <UserManagement />
             </TabsContent>
           )}
 
-          <TabsContent value="subscription">
-            <SubscriptionManagement />
-          </TabsContent>
+          {effectiveRole && (
+            <TabsContent value="promo-codes">
+              <PromoCodesManagement />
+            </TabsContent>
+          )}
 
-          <TabsContent value="settings">
-            <div className="space-y-6">
-              <ProfileSettings />
-              
-              <div>
-                <h2 className="text-lg font-semibold mb-2">Account Security</h2>
-                <p className="text-sm text-muted-foreground mb-4">Manage your account security settings</p>
+          {/* Subscription tab - only for non-admin users */}
+          {!effectiveRole && (
+            <TabsContent value="subscription">
+              <SubscriptionManagement />
+            </TabsContent>
+          )}
+
+          {/* Settings tab - only for non-admin users */}
+          {!effectiveRole && (
+            <TabsContent value="settings">
+              <div className="space-y-6">
+                <ProfileSettings />
+                
+                <div>
+                  <h2 className="text-lg font-semibold mb-2">Account Security</h2>
+                  <p className="text-sm text-muted-foreground mb-4">Manage your account security settings</p>
+                </div>
+                <TwoFactorSetup
+                  isEnabled={user?.twoFactorEnabled || false}
+                  onUpdate={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] })}
+                />
               </div>
-              <TwoFactorSetup
-                isEnabled={user?.twoFactorEnabled || false}
-                onUpdate={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] })}
-              />
-            </div>
-          </TabsContent>
+            </TabsContent>
+          )}
 
-          {user?.isAdmin && (
+          {effectiveRole && (
             <TabsContent value="storage">
               <StorageSettings />
             </TabsContent>
           )}
+
+          {/* Admin Settings tab */}
+          {effectiveRole && (
+            <TabsContent value="admin-settings">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Platform Settings</CardTitle>
+                  <CardDescription>
+                    Configure platform-wide settings and preferences
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  <div className="space-y-2">
+                    <Label htmlFor="currency-select">Display Currency</Label>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Choose the currency for displaying revenue metrics
+                    </p>
+                    <Select
+                      value={displayCurrency}
+                      onValueChange={(value) => updateSettingsMutation.mutate({ displayCurrency: value })}
+                    >
+                      <SelectTrigger id="currency-select" className="w-48" data-testid="select-currency">
+                        <SelectValue placeholder="Select currency" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="EUR">EUR (€)</SelectItem>
+                        <SelectItem value="USD">USD ($)</SelectItem>
+                        <SelectItem value="GBP">GBP (£)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {updateSettingsMutation.isPending && (
+                      <p className="text-sm text-muted-foreground flex items-center gap-2">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Saving...
+                      </p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </TabsContent>
+          )}
         </Tabs>
+      )}
       </main>
 
       {/* Create Document Dialog */}

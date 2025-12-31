@@ -9,6 +9,7 @@ import {
   documentSigners,
   textFieldValues,
   signerSessions,
+  promoCampaigns,
   type Document,
   type InsertDocument,
   type SignatureAsset,
@@ -27,6 +28,8 @@ import {
   type InsertDocumentSigner,
   type SignerSession,
   type InsertSignerSession,
+  type PromoCampaign,
+  type InsertPromoCampaign,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, desc, or, isNull } from "drizzle-orm";
@@ -93,6 +96,15 @@ export interface IStorage {
     signerEmail?: string;
   }): Promise<{ id: string; documentId: string; spotKey: string; value: string; fieldType: string }>;
   getTextFieldValues(documentId: string): Promise<Array<{ spotKey: string; value: string; fieldType: string }>>;
+
+  // Promo Campaigns
+  createPromoCampaign(campaign: InsertPromoCampaign): Promise<PromoCampaign>;
+  getPromoCampaign(id: string): Promise<PromoCampaign | undefined>;
+  getPromoCampaignByCode(code: string): Promise<PromoCampaign | undefined>;
+  getAllPromoCampaigns(): Promise<PromoCampaign[]>;
+  updatePromoCampaign(id: string, updates: Partial<PromoCampaign>): Promise<PromoCampaign | undefined>;
+  deletePromoCampaign(id: string): Promise<boolean>;
+  incrementPromoRedemption(id: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -421,6 +433,53 @@ export class DatabaseStorage implements IStorage {
         eq(signerSessions.status, "pending"),
         // Note: Can't compare timestamps directly, would need raw SQL for expired check
       ));
+  }
+
+  // Promo Campaigns
+  async createPromoCampaign(campaign: InsertPromoCampaign): Promise<PromoCampaign> {
+    const [result] = await db.insert(promoCampaigns).values(campaign).returning();
+    return result;
+  }
+
+  async getPromoCampaign(id: string): Promise<PromoCampaign | undefined> {
+    const [campaign] = await db.select().from(promoCampaigns).where(eq(promoCampaigns.id, id));
+    return campaign || undefined;
+  }
+
+  async getPromoCampaignByCode(code: string): Promise<PromoCampaign | undefined> {
+    const [campaign] = await db
+      .select()
+      .from(promoCampaigns)
+      .where(eq(promoCampaigns.code, code.toUpperCase()));
+    return campaign || undefined;
+  }
+
+  async getAllPromoCampaigns(): Promise<PromoCampaign[]> {
+    return db.select().from(promoCampaigns).orderBy(desc(promoCampaigns.createdAt));
+  }
+
+  async updatePromoCampaign(id: string, updates: Partial<PromoCampaign>): Promise<PromoCampaign | undefined> {
+    const [campaign] = await db
+      .update(promoCampaigns)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(promoCampaigns.id, id))
+      .returning();
+    return campaign || undefined;
+  }
+
+  async deletePromoCampaign(id: string): Promise<boolean> {
+    const result = await db.delete(promoCampaigns).where(eq(promoCampaigns.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async incrementPromoRedemption(id: string): Promise<void> {
+    const campaign = await this.getPromoCampaign(id);
+    if (campaign) {
+      await db
+        .update(promoCampaigns)
+        .set({ currentRedemptions: campaign.currentRedemptions + 1 })
+        .where(eq(promoCampaigns.id, id));
+    }
   }
 }
 

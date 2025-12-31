@@ -13,7 +13,10 @@ import OneOffDocument from "@/pages/one-off-document";
 import MobileSignature from "@/pages/mobile-signature";
 import VerifyEmailPage from "@/pages/verify-email";
 import StorageSettingsPage from "@/pages/storage-settings";
-import AdminPanel from "@/pages/admin-panel";
+import TeamSettingsPage from "@/pages/team-settings";
+import TeamInvitePage from "@/pages/team-invite";
+import TermsOfService from "@/pages/terms-of-service";
+import PrivacyPolicy from "@/pages/privacy-policy";
 
 function Router() {
   return (
@@ -25,7 +28,10 @@ function Router() {
       <Route path="/bulk-import" component={BulkImportPage} />
       <Route path="/documents/new" component={OneOffDocument} />
       <Route path="/storage-settings" component={StorageSettingsPage} />
-      <Route path="/admin" component={AdminPanel} />
+      <Route path="/team-settings" component={TeamSettingsPage} />
+      <Route path="/team/invite" component={TeamInvitePage} />
+      <Route path="/terms" component={TermsOfService} />
+      <Route path="/privacy" component={PrivacyPolicy} />
       <Route path="/d/:id" component={SigningPage} />
       <Route path="/sign-mobile/:sessionToken" component={MobileSignature} />
       <Route component={NotFound} />

@@ -37,6 +37,50 @@ function joinStoragePath(prefix: string, key: string): string {
 // Configurable storage backend (Replit Object Storage or S3/R2)
 let objectStorage: IStorageBackend;
 
+// Helper function to check if a user can access documents from another user (team membership)
+async function canAccessUserDocuments(currentUserId: string, documentOwnerId: string | null): Promise<boolean> {
+  if (!documentOwnerId) return false;
+  if (currentUserId === documentOwnerId) return true;
+  
+  // Check if both users are in the same organization
+  const currentUser = await authStorage.getUser(currentUserId);
+  const documentOwner = await authStorage.getUser(documentOwnerId);
+  
+  if (!currentUser?.organizationId || !documentOwner?.organizationId) {
+    return false;
+  }
+  
+  // Users are in the same organization
+  return currentUser.organizationId === documentOwner.organizationId;
+}
+
+// Get all user IDs that the current user can access documents from (self + team members)
+async function getAccessibleUserIds(userId: string): Promise<string[]> {
+  const userIds = [userId];
+  
+  const user = await authStorage.getUser(userId);
+  if (!user?.organizationId) {
+    return userIds;
+  }
+  
+  // Get all members in the same organization
+  const members = await authStorage.getOrganizationMembers(user.organizationId);
+  for (const member of members) {
+    if (member.userId !== userId) {
+      userIds.push(member.userId);
+    }
+  }
+  
+  return userIds;
+}
+
+// Helper to check if a user can access a template (owner, default, or team member)
+async function canAccessTemplate(userId: string, templateOwnerId: string | null, isDefault: boolean): Promise<boolean> {
+  if (isDefault) return true;
+  if (!templateOwnerId) return false;
+  return canAccessUserDocuments(userId, templateOwnerId);
+}
+
 // BoldSign compatibility mode
 const BOLDSIGN_COMPAT = process.env.WEBHOOK_COMPAT_MODE === "boldsign";
 if (BOLDSIGN_COMPAT) {
@@ -1085,7 +1129,7 @@ export async function registerRoutes(
 
   // ============ ADMIN ENDPOINTS ============
 
-  // Get all documents for authenticated user (admin dashboard)
+  // Get all documents for authenticated user (admin dashboard) - includes team documents
   app.get("/api/admin/documents", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = (req.user as any)?.id;
@@ -1093,8 +1137,20 @@ export async function registerRoutes(
         return res.status(401).json({ error: "User not authenticated" });
       }
 
-      const userDocuments = await storage.getDocumentsByUser(userId);
-      res.json(userDocuments);
+      // Get accessible user IDs (self + team members)
+      const accessibleUserIds = await getAccessibleUserIds(userId);
+      
+      // Fetch documents from all accessible users
+      let allDocuments: any[] = [];
+      for (const uid of accessibleUserIds) {
+        const docs = await storage.getDocumentsByUser(uid);
+        allDocuments = allDocuments.concat(docs);
+      }
+      
+      // Sort by createdAt descending
+      allDocuments.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      
+      res.json(allDocuments);
     } catch (error) {
       console.error("Error fetching admin documents:", error);
       res.status(500).json({ error: "Failed to fetch documents" });
@@ -1112,8 +1168,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Document not found" });
       }
 
-      // Verify ownership
-      if (document.userId !== userId) {
+      // Verify ownership or team membership
+      const hasAccess = await canAccessUserDocuments(userId, document.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -1143,7 +1200,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Document not found" });
       }
 
-      if (document.userId !== userId) {
+      // Verify ownership or team membership
+      const hasAccess = await canAccessUserDocuments(userId, document.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -1173,7 +1232,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Document not found" });
       }
 
-      if (document.userId !== userId) {
+      // Verify ownership or team membership
+      const hasAccess = await canAccessUserDocuments(userId, document.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -1200,7 +1261,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Document not found" });
       }
 
-      if (document.userId !== userId) {
+      // Verify ownership or team membership
+      const hasAccess = await canAccessUserDocuments(userId, document.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -1229,6 +1292,22 @@ export async function registerRoutes(
       const userId = (req.user as any)?.id;
       if (!userId) {
         return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Admin accounts cannot create documents - they are for platform management only
+      const user = await authStorage.getUser(userId);
+      if (user?.isAdmin) {
+        return res.status(403).json({ error: "Admin accounts cannot create documents. Admin accounts are for platform management only." });
+      }
+
+      // Check document usage limits for free accounts
+      const usage = await authStorage.checkDocumentUsage(userId);
+      if (!usage.canCreate) {
+        return res.status(403).json({
+          error: "Document limit reached",
+          message: `You have reached your monthly limit of ${usage.limit} documents. Upgrade to Pro for unlimited documents.`,
+          usage: { used: usage.used, limit: usage.limit, accountType: usage.accountType },
+        });
       }
 
       const parseResult = createDocumentRequestSchema.safeParse(req.body);
@@ -1268,6 +1347,9 @@ export async function registerRoutes(
       // Log audit event
       await logAuditEvent(document.id, "document_created", req, { template_id, userId });
 
+      // Increment document count for free users
+      await authStorage.incrementDocumentCount(userId);
+
       const baseUrl = process.env.BASE_URL || `https://${req.headers.host}`;
       const signingUrl = `${baseUrl}/d/${document.id}?token=${signingToken}`;
 
@@ -1284,12 +1366,26 @@ export async function registerRoutes(
     }
   });
 
-  // Bulk create documents from array of data
+  // Bulk create documents from array of data (Pro feature)
   app.post("/api/admin/documents/bulk", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = (req.user as any)?.id;
       if (!userId) {
         return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Check if user has Pro subscription for bulk import
+      const user = await authStorage.getUser(userId);
+      
+      // Admin accounts cannot create documents - they are for platform management only
+      if (user?.isAdmin) {
+        return res.status(403).json({ error: "Admin accounts cannot create documents. Admin accounts are for platform management only." });
+      }
+      
+      if (user?.accountType !== "pro") {
+        return res.status(403).json({ 
+          error: "Bulk import is a Pro feature. Please upgrade your subscription to use this feature." 
+        });
       }
 
       const { template_id, documents: documentDataArray, send_emails } = req.body;
@@ -1416,6 +1512,12 @@ export async function registerRoutes(
       const userId = (req.user as any)?.id;
       if (!userId) {
         return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Admin accounts cannot create documents - they are for platform management only
+      const user = await authStorage.getUser(userId);
+      if (user?.isAdmin) {
+        return res.status(403).json({ error: "Admin accounts cannot create documents. Admin accounts are for platform management only." });
       }
 
       const { templateId, signers, creatorFieldValues, sendEmail } = req.body;
@@ -1646,6 +1748,22 @@ export async function registerRoutes(
         return res.status(401).json({ error: "User not authenticated" });
       }
 
+      // Admin accounts cannot create documents - they are for platform management only
+      const userRecord = await authStorage.getUser(userId);
+      if (userRecord?.isAdmin) {
+        return res.status(403).json({ error: "Admin accounts cannot create documents. Admin accounts are for platform management only." });
+      }
+
+      // Check document usage limits for free accounts
+      const usage = await authStorage.checkDocumentUsage(userId);
+      if (!usage.canCreate) {
+        return res.status(403).json({
+          error: "Document limit reached",
+          message: `You have reached your monthly limit of ${usage.limit} documents. Upgrade to Pro for unlimited documents.`,
+          usage: { used: usage.used, limit: usage.limit, accountType: usage.accountType },
+        });
+      }
+
       const file = req.file;
       if (!file) {
         return res.status(400).json({ error: "PDF file is required" });
@@ -1813,6 +1931,9 @@ export async function registerRoutes(
         fieldCount: fields.length,
         creatorFilledCount: creatorFillFields.length,
       });
+
+      // Increment document count for free users
+      await authStorage.incrementDocumentCount(userId);
 
       const baseUrl = process.env.BASE_URL || `https://${req.headers.host}`;
       const signerLinks: Array<{ id: string; email: string; name: string; signLink: string; emailSent: boolean }> = [];
@@ -1994,6 +2115,81 @@ export async function registerRoutes(
     }
   });
 
+  // ============ USER ACCOUNT DELETION ============
+  
+  // User self-deletion (soft delete with 30-day grace period)
+  app.delete("/api/account", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (user.isAdmin) {
+        return res.status(400).json({ error: "Admin accounts cannot be self-deleted" });
+      }
+
+      if (user.deletedAt) {
+        return res.status(400).json({ error: "Account is already scheduled for deletion" });
+      }
+
+      // Calculate scheduled deletion date
+      // For paid users with active subscription, deletion starts when subscription ends
+      let scheduledDeletionDate = new Date();
+      let gracePeriodStart = new Date();
+      
+      if (user.accountType === "pro" && 
+          user.subscriptionCurrentPeriodEnd && 
+          user.subscriptionCurrentPeriodEnd > new Date()) {
+        // Account stays active until subscription ends, then 30-day grace period
+        gracePeriodStart = new Date(user.subscriptionCurrentPeriodEnd);
+        scheduledDeletionDate = new Date(user.subscriptionCurrentPeriodEnd);
+      }
+      scheduledDeletionDate.setDate(scheduledDeletionDate.getDate() + 30);
+
+      // Import db and users for update
+      const { db } = await import("./db");
+      const { users } = await import("@shared/models/auth");
+      const { eq } = await import("drizzle-orm");
+
+      await db.update(users).set({
+        deletedAt: new Date(),
+        scheduledDeletionDate,
+        deletionReason: "User requested deletion",
+        updatedAt: new Date(),
+      }).where(eq(users.id, userId));
+
+      // Send confirmation email
+      try {
+        const { sendAccountDeletionEmail } = await import("./services/emailService");
+        await sendAccountDeletionEmail(
+          user.email,
+          user.firstName || "User",
+          scheduledDeletionDate,
+          gracePeriodStart > new Date() ? gracePeriodStart : null
+        );
+      } catch (emailError) {
+        console.error("Failed to send account deletion email:", emailError);
+        // Don't fail the deletion if email fails
+      }
+
+      res.json({ 
+        success: true, 
+        message: "Your account has been scheduled for deletion.",
+        scheduledDeletionDate,
+        gracePeriodStart: gracePeriodStart > new Date() ? gracePeriodStart : new Date(),
+      });
+    } catch (error) {
+      console.error("Error deleting account:", error);
+      res.status(500).json({ error: "Failed to delete account" });
+    }
+  });
+
   // Get OAuth URL for external storage provider
   app.get("/api/storage/oauth/:provider", isAuthenticated, async (req: Request, res: Response) => {
     try {
@@ -2114,7 +2310,7 @@ export async function registerRoutes(
 
   // ============ TEMPLATE ENDPOINTS ============
 
-  // Get all templates for authenticated user (includes default templates)
+  // Get all templates for authenticated user (includes default templates and team templates)
   app.get("/api/admin/templates", isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = (req.user as any)?.id;
@@ -2122,8 +2318,24 @@ export async function registerRoutes(
         return res.status(401).json({ error: "User not authenticated" });
       }
 
-      const userTemplates = await storage.getTemplatesForUser(userId);
-      res.json(userTemplates);
+      // Get accessible user IDs (self + team members)
+      const accessibleUserIds = await getAccessibleUserIds(userId);
+      
+      // Fetch templates from all accessible users
+      let allTemplates: any[] = [];
+      const seenIds = new Set<string>();
+      
+      for (const uid of accessibleUserIds) {
+        const templates = await storage.getTemplatesForUser(uid);
+        for (const t of templates) {
+          if (!seenIds.has(t.id)) {
+            seenIds.add(t.id);
+            allTemplates.push(t);
+          }
+        }
+      }
+      
+      res.json(allTemplates);
     } catch (error) {
       console.error("Error fetching templates:", error);
       res.status(500).json({ error: "Failed to fetch templates" });
@@ -2141,8 +2353,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Template not found" });
       }
 
-      // Allow access if user owns template or it's a default template
-      if (template.userId && template.userId !== userId && !template.isDefault) {
+      // Allow access if user owns template, it's a default template, or user is in same team
+      const hasAccess = await canAccessTemplate(userId, template.userId, template.isDefault);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2199,8 +2412,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Template not found" });
       }
 
-      // Only owner can edit (not default templates)
-      if (template.userId !== userId) {
+      // Only owner or team member can edit (not default templates)
+      const hasAccess = await canAccessUserDocuments(userId, template.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2239,8 +2453,9 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Cannot delete default templates" });
       }
 
-      // Only owner can delete their own templates
-      if (template.userId !== userId) {
+      // Only owner or team member can delete templates
+      const hasAccess = await canAccessUserDocuments(userId, template.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2326,7 +2541,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Template not found" });
       }
 
-      if (template.userId && template.userId !== userId && !template.isDefault) {
+      // Allow access if user owns template, it's a default template, or user is in same team
+      const hasAccess = await canAccessTemplate(userId, template.userId, template.isDefault);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2349,7 +2566,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Template not found" });
       }
 
-      if (template.userId !== userId) {
+      // Only owner or team member can edit
+      const hasAccess = await canAccessUserDocuments(userId, template.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2411,7 +2630,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Template not found" });
       }
 
-      if (template.userId && template.userId !== userId && !template.isDefault) {
+      // Allow access if user owns template, it's a default template, or user is in same team
+      const hasAccess = await canAccessTemplate(userId, template.userId, template.isDefault);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2438,7 +2659,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Template not found" });
       }
 
-      if (template.userId && template.userId !== userId && !template.isDefault) {
+      // Allow access if user owns template, it's a default template, or user is in same team
+      const hasAccess = await canAccessTemplate(userId, template.userId, template.isDefault);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2464,11 +2687,18 @@ export async function registerRoutes(
   // Get template metadata for external API integration
   app.get("/api/templates/:id/metadata", isAuthenticated, async (req: Request, res: Response) => {
     try {
+      const userId = (req.user as any)?.id;
       const templateId = req.params.id;
 
       const template = await storage.getTemplate(templateId);
       if (!template) {
         return res.status(404).json({ error: "Template not found" });
+      }
+
+      // Allow access if user owns template, it's a default template, or user is in same team
+      const hasAccess = await canAccessTemplate(userId, template.userId, template.isDefault);
+      if (!hasAccess) {
+        return res.status(403).json({ error: "Access denied" });
       }
 
       const metadata: {
@@ -2612,7 +2842,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Document not found" });
       }
 
-      if (document.userId !== userId) {
+      // Verify ownership or team membership
+      const hasAccess = await canAccessUserDocuments(userId, document.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2661,7 +2893,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Document not found" });
       }
 
-      if (document.userId !== userId) {
+      // Verify ownership or team membership
+      const hasAccess = await canAccessUserDocuments(userId, document.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -2703,7 +2937,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Document not found" });
       }
 
-      if (document.userId !== userId) {
+      // Verify ownership or team membership
+      const hasAccess = await canAccessUserDocuments(userId, document.userId);
+      if (!hasAccess) {
         return res.status(403).json({ error: "Access denied" });
       }
 

@@ -1,9 +1,13 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { 
   ArrowLeft, 
   Users, 
@@ -16,7 +20,9 @@ import {
   Crown,
   User,
   Mail,
-  Calendar
+  Calendar,
+  Settings,
+  Loader2,
 } from "lucide-react";
 import { Link } from "wouter";
 import {
@@ -59,6 +65,24 @@ interface AdminStats {
   documentGrowth: { date: string; count: number }[];
   monthlyRevenue: number;
   arr: number;
+}
+
+interface AdminSettingsData {
+  id: string | null;
+  displayCurrency: string;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  EUR: "€",
+  USD: "$",
+  GBP: "£",
+};
+
+function formatCurrency(amount: number, currency: string): string {
+  const symbol = CURRENCY_SYMBOLS[currency] || currency;
+  return `${symbol}${amount.toLocaleString()}`;
 }
 
 interface AdminUser {
@@ -164,6 +188,7 @@ function GrowthChart({
 
 export default function AdminPanel() {
   const { toast } = useToast();
+  const [activeTab, setActiveTab] = useState("overview");
 
   const { data: stats, isLoading: statsLoading } = useQuery<AdminStats>({
     queryKey: ["/api/ee/admin/stats"],
@@ -171,6 +196,32 @@ export default function AdminPanel() {
 
   const { data: users, isLoading: usersLoading } = useQuery<AdminUser[]>({
     queryKey: ["/api/ee/admin/users"],
+  });
+
+  const { data: adminSettings, isLoading: settingsLoading } = useQuery<AdminSettingsData>({
+    queryKey: ["/api/ee/admin/settings"],
+  });
+
+  const displayCurrency = adminSettings?.displayCurrency || "EUR";
+
+  const updateSettingsMutation = useMutation({
+    mutationFn: async (data: { displayCurrency: string }) => {
+      return apiRequest("PATCH", "/api/ee/admin/settings", data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ee/admin/settings"] });
+      toast({
+        title: "Settings Updated",
+        description: "Admin settings have been saved.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
   });
 
   const deleteUserMutation = useMutation({
@@ -214,7 +265,7 @@ export default function AdminPanel() {
     },
   });
 
-  if (statsLoading || usersLoading) {
+  if (statsLoading || usersLoading || settingsLoading) {
     return (
       <div className="min-h-screen bg-background p-6 flex items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
@@ -238,167 +289,227 @@ export default function AdminPanel() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8 space-y-8">
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <StatCard 
-            title="Total Users" 
-            value={stats?.totalUsers || 0}
-            icon={Users}
-            description={`${stats?.freeUsers || 0} free, ${stats?.proUsers || 0} pro`}
-          />
-          <StatCard 
-            title="Total Documents" 
-            value={stats?.totalDocuments || 0}
-            icon={FileText}
-          />
-          <StatCard 
-            title="Monthly Revenue" 
-            value={`$${(stats?.monthlyRevenue || 0).toLocaleString()}`}
-            icon={DollarSign}
-          />
-          <StatCard 
-            title="Annual Revenue (ARR)" 
-            value={`$${(stats?.arr || 0).toLocaleString()}`}
-            icon={TrendingUp}
-          />
-        </div>
+      <main className="container mx-auto px-4 py-8">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+          <TabsList>
+            <TabsTrigger value="overview" data-testid="tab-overview">
+              <TrendingUp className="h-4 w-4 mr-2" />
+              Overview
+            </TabsTrigger>
+            <TabsTrigger value="users" data-testid="tab-users">
+              <Users className="h-4 w-4 mr-2" />
+              Users
+            </TabsTrigger>
+            <TabsTrigger value="settings" data-testid="tab-settings">
+              <Settings className="h-4 w-4 mr-2" />
+              Settings
+            </TabsTrigger>
+          </TabsList>
 
-        <div className="grid gap-4 md:grid-cols-2">
-          {stats?.userGrowth && stats.userGrowth.length > 0 && (
-            <GrowthChart 
-              data={stats.userGrowth} 
-              title="User Growth (30 days)"
-              color="hsl(var(--primary))"
-            />
-          )}
-          {stats?.documentGrowth && stats.documentGrowth.length > 0 && (
-            <GrowthChart 
-              data={stats.documentGrowth} 
-              title="Documents Created (30 days)"
-              color="hsl(142 76% 36%)"
-            />
-          )}
-        </div>
+          <TabsContent value="overview" className="space-y-6">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              <StatCard 
+                title="Total Users" 
+                value={stats?.totalUsers || 0}
+                icon={Users}
+                description={`${stats?.freeUsers || 0} free, ${stats?.proUsers || 0} pro`}
+              />
+              <StatCard 
+                title="Total Documents" 
+                value={stats?.totalDocuments || 0}
+                icon={FileText}
+              />
+              <StatCard 
+                title="Monthly Revenue" 
+                value={formatCurrency(stats?.monthlyRevenue || 0, displayCurrency)}
+                icon={DollarSign}
+              />
+              <StatCard 
+                title="Annual Revenue (ARR)" 
+                value={formatCurrency(stats?.arr || 0, displayCurrency)}
+                icon={TrendingUp}
+              />
+            </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Users</CardTitle>
-            <CardDescription>
-              Manage user accounts and permissions
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>User</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Documents</TableHead>
-                  <TableHead>Joined</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {users?.map((user) => (
-                  <TableRow key={user.id} data-testid={`row-user-${user.id}`}>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center">
-                          {user.isAdmin ? (
-                            <Crown className="h-4 w-4 text-yellow-500" />
-                          ) : (
-                            <User className="h-4 w-4" />
-                          )}
-                        </div>
-                        <div>
-                          <div className="font-medium flex items-center gap-2 flex-wrap">
-                            {user.firstName || user.lastName 
-                              ? `${user.firstName || ''} ${user.lastName || ''}`.trim()
-                              : 'No name'
-                            }
-                            {user.isAdmin && (
-                              <Badge variant="outline" className="text-xs">Admin</Badge>
+            <div className="grid gap-4 md:grid-cols-2">
+              {stats?.userGrowth && stats.userGrowth.length > 0 && (
+                <GrowthChart 
+                  data={stats.userGrowth} 
+                  title="User Growth (30 days)"
+                  color="hsl(var(--primary))"
+                />
+              )}
+              {stats?.documentGrowth && stats.documentGrowth.length > 0 && (
+                <GrowthChart 
+                  data={stats.documentGrowth} 
+                  title="Documents Created (30 days)"
+                  color="hsl(142 76% 36%)"
+                />
+              )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="users">
+            <Card>
+              <CardHeader>
+                <CardTitle>Users</CardTitle>
+                <CardDescription>
+                  Manage user accounts and permissions
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>User</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Documents</TableHead>
+                      <TableHead>Joined</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {users?.map((user) => (
+                      <TableRow key={user.id} data-testid={`row-user-${user.id}`}>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center">
+                              {user.isAdmin ? (
+                                <Crown className="h-4 w-4 text-yellow-500" />
+                              ) : (
+                                <User className="h-4 w-4" />
+                              )}
+                            </div>
+                            <div>
+                              <div className="font-medium flex items-center gap-2 flex-wrap">
+                                {user.firstName || user.lastName 
+                                  ? `${user.firstName || ''} ${user.lastName || ''}`.trim()
+                                  : 'No name'
+                                }
+                                {user.isAdmin && (
+                                  <Badge variant="outline" className="text-xs">Admin</Badge>
+                                )}
+                              </div>
+                              <div className="text-sm text-muted-foreground">{user.email}</div>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col gap-1">
+                            <Badge 
+                              variant={user.accountType === 'pro' ? 'default' : 'secondary'}
+                              className={user.accountType === 'pro' ? 'bg-gradient-to-r from-violet-500 to-purple-500' : ''}
+                            >
+                              {user.accountType === 'pro' ? 'Pro' : 'Free'}
+                            </Badge>
+                            {!user.emailVerified && (
+                              <Badge variant="outline" className="text-xs text-yellow-600">
+                                Unverified
+                              </Badge>
                             )}
                           </div>
-                          <div className="text-sm text-muted-foreground">{user.email}</div>
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-col gap-1">
-                        <Badge 
-                          variant={user.accountType === 'pro' ? 'default' : 'secondary'}
-                          className={user.accountType === 'pro' ? 'bg-gradient-to-r from-violet-500 to-purple-500' : ''}
-                        >
-                          {user.accountType === 'pro' ? 'Pro' : 'Free'}
-                        </Badge>
-                        {!user.emailVerified && (
-                          <Badge variant="outline" className="text-xs text-yellow-600">
-                            Unverified
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>{user.documentCount}</TableCell>
-                    <TableCell>
-                      {user.createdAt 
-                        ? new Date(user.createdAt).toLocaleDateString()
-                        : '-'
-                      }
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => toggleAdminMutation.mutate(user.id)}
-                          disabled={toggleAdminMutation.isPending}
-                          title={user.isAdmin ? "Remove admin" : "Make admin"}
-                          data-testid={`button-toggle-admin-${user.id}`}
-                        >
-                          {user.isAdmin ? (
-                            <ShieldOff className="h-4 w-4" />
-                          ) : (
-                            <Shield className="h-4 w-4" />
-                          )}
-                        </Button>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button 
-                              variant="ghost" 
+                        </TableCell>
+                        <TableCell>{user.documentCount}</TableCell>
+                        <TableCell>
+                          {user.createdAt 
+                            ? new Date(user.createdAt).toLocaleDateString()
+                            : '-'
+                          }
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="ghost"
                               size="icon"
-                              disabled={user.isAdmin}
-                              data-testid={`button-delete-${user.id}`}
+                              onClick={() => toggleAdminMutation.mutate(user.id)}
+                              disabled={toggleAdminMutation.isPending}
+                              title={user.isAdmin ? "Remove admin" : "Make admin"}
+                              data-testid={`button-toggle-admin-${user.id}`}
                             >
-                              <Trash2 className="h-4 w-4 text-destructive" />
+                              {user.isAdmin ? (
+                                <ShieldOff className="h-4 w-4" />
+                              ) : (
+                                <Shield className="h-4 w-4" />
+                              )}
                             </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Delete User Account</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                This will permanently delete the user account for <strong>{user.email}</strong> and all associated data including {user.documentCount} documents. This action cannot be undone.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() => deleteUserMutation.mutate(user.id)}
-                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                              >
-                                Delete User
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+                            <AlertDialog>
+                              <AlertDialogTrigger asChild>
+                                <Button 
+                                  variant="ghost" 
+                                  size="icon"
+                                  disabled={user.isAdmin}
+                                  data-testid={`button-delete-${user.id}`}
+                                >
+                                  <Trash2 className="h-4 w-4 text-destructive" />
+                                </Button>
+                              </AlertDialogTrigger>
+                              <AlertDialogContent>
+                                <AlertDialogHeader>
+                                  <AlertDialogTitle>Delete User Account</AlertDialogTitle>
+                                  <AlertDialogDescription>
+                                    This will permanently delete the user account for <strong>{user.email}</strong> and all associated data including {user.documentCount} documents. This action cannot be undone.
+                                  </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                  <AlertDialogAction
+                                    onClick={() => deleteUserMutation.mutate(user.id)}
+                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                  >
+                                    Delete User
+                                  </AlertDialogAction>
+                                </AlertDialogFooter>
+                              </AlertDialogContent>
+                            </AlertDialog>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="settings">
+            <Card>
+              <CardHeader>
+                <CardTitle>Admin Settings</CardTitle>
+                <CardDescription>
+                  Configure platform-wide settings for the admin panel
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="space-y-2">
+                  <Label htmlFor="currency">Display Currency</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Choose the currency for displaying revenue and financial metrics
+                  </p>
+                  <Select
+                    value={displayCurrency}
+                    onValueChange={(value) => updateSettingsMutation.mutate({ displayCurrency: value })}
+                    disabled={updateSettingsMutation.isPending}
+                  >
+                    <SelectTrigger className="w-48" data-testid="select-currency">
+                      <SelectValue placeholder="Select currency" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="EUR">EUR (Euro)</SelectItem>
+                      <SelectItem value="USD">USD (US Dollar)</SelectItem>
+                      <SelectItem value="GBP">GBP (British Pound)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {updateSettingsMutation.isPending && (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Saving...
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </main>
     </div>
   );

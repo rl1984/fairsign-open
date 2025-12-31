@@ -161,18 +161,23 @@ export function registerAuthRoutes(app: Express): void {
     }
   });
 
-  // Admin: Get all users
+  // Admin: Get all active users (non-deleted)
   app.get("/api/admin/users", isAuthenticated, isAdmin, async (req: any, res) => {
     try {
       const users = await authStorage.getAllUsers();
-      res.json(users.map(u => ({
+      const activeUsers = users.filter(u => !u.deletedAt);
+      res.json(activeUsers.map(u => ({
         id: u.id,
         email: u.email,
         firstName: u.firstName,
         lastName: u.lastName,
         isAdmin: u.isAdmin,
         twoFactorEnabled: u.twoFactorEnabled,
+        emailVerified: u.emailVerified ?? false,
         createdAt: u.createdAt,
+        deletedAt: u.deletedAt,
+        scheduledDeletionDate: u.scheduledDeletionDate,
+        deletionReason: u.deletionReason,
       })));
     } catch (error) {
       console.error("Error fetching users:", error);

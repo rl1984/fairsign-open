@@ -1,9 +1,19 @@
 import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { storage } from "../storage";
 import type { Document, EmailLog } from "@shared/schema";
 import { FAIRSIGN_LOGO_SVG } from "./fairsignLogo";
 
-export type EmailType = "signature_request" | "completion_notice" | "reminder" | "email_verification";
+export type EmailType = "signature_request" | "completion_notice" | "reminder" | "email_verification" | "team_invitation" | "account_deletion";
+
+let resendClient: Resend | null = null;
+
+function getResendClient(): Resend | null {
+  if (!resendClient && process.env.RESEND_API_KEY) {
+    resendClient = new Resend(process.env.RESEND_API_KEY);
+  }
+  return resendClient;
+}
 
 export interface EmailAttachment {
   filename: string;
@@ -56,6 +66,8 @@ export async function sendEmail(options: SendEmailOptions): Promise<EmailResult>
   const { documentId, emailType, toEmail, toName, subject, htmlBody, attachments } = options;
 
   let emailLogId: string | null = null;
+  const fromEmail = process.env.SMTP_FROM || process.env.SMTP_FROM_EMAIL || "noreply@fairsign.io";
+  const fromName = process.env.SMTP_FROM_NAME || "FairSign.io";
 
   try {
     const emailLog = await storage.createEmailLog({
@@ -71,10 +83,73 @@ export async function sendEmail(options: SendEmailOptions): Promise<EmailResult>
     });
     emailLogId = emailLog.id;
 
+    // Try Resend first
+    const resend = getResendClient();
+    if (resend) {
+      try {
+        const resendOptions: any = {
+          from: `${fromName} <${fromEmail}>`,
+          to: [toEmail],
+          subject,
+          html: htmlBody,
+        };
+
+        if (attachments && attachments.length > 0) {
+          resendOptions.attachments = attachments.map(att => ({
+            filename: att.filename,
+            content: att.content,
+          }));
+        }
+
+        const { data, error } = await resend.emails.send(resendOptions);
+
+        if (error) {
+          console.error("[EMAIL] Resend error:", error);
+          await storage.updateEmailLog(emailLog.id, {
+            status: "failed",
+            errorMessage: `Resend error: ${error.message}`,
+          });
+
+          return {
+            success: false,
+            emailLogId: emailLog.id,
+            error: error.message,
+          };
+        }
+
+        await storage.updateEmailLog(emailLog.id, {
+          status: "sent",
+          sentAt: new Date(),
+        });
+
+        console.log(`[EMAIL] Sent to ${toEmail} via Resend (ID: ${data?.id})`);
+
+        return {
+          success: true,
+          emailLogId: emailLog.id,
+        };
+      } catch (resendError) {
+        const err = resendError instanceof Error ? resendError.message : "Resend send failed";
+        console.error("[EMAIL] Resend exception:", err);
+        
+        await storage.updateEmailLog(emailLog.id, {
+          status: "failed",
+          errorMessage: err,
+        });
+
+        return {
+          success: false,
+          emailLogId: emailLog.id,
+          error: err,
+        };
+      }
+    }
+
+    // Fall back to SMTP
     const smtpConfig = getSmtpTransporter();
 
     if (smtpConfig) {
-      const { transporter, fromEmail, fromName } = smtpConfig;
+      const { transporter, fromEmail: smtpFromEmail, fromName: smtpFromName } = smtpConfig;
 
       try {
         await transporter.verify();
@@ -95,7 +170,7 @@ export async function sendEmail(options: SendEmailOptions): Promise<EmailResult>
       }
 
       const mailOptions: nodemailer.SendMailOptions = {
-        from: `"${fromName}" <${fromEmail}>`,
+        from: `"${smtpFromName}" <${smtpFromEmail}>`,
         to: toName ? `"${toName}" <${toEmail}>` : toEmail,
         subject,
         html: htmlBody,
@@ -123,11 +198,12 @@ export async function sendEmail(options: SendEmailOptions): Promise<EmailResult>
         emailLogId: emailLog.id,
       };
     } else {
+      // Dev mode - log only
       await storage.updateEmailLog(emailLog.id, {
         status: "logged",
       });
 
-      console.log(`[EMAIL SERVICE - DEV MODE] SMTP not configured`);
+      console.log(`[EMAIL SERVICE - DEV MODE] No email provider configured`);
       console.log(`To: ${toName ? `${toName} <${toEmail}>` : toEmail}`);
       console.log(`Subject: ${subject}`);
       console.log(`Type: ${emailType}`);
@@ -960,6 +1036,177 @@ export async function sendEmailVerification(
   return sendEmail({
     emailType: "email_verification",
     toEmail: email,
+    subject,
+    htmlBody,
+  });
+}
+
+/**
+ * Sends account deletion confirmation email
+ */
+export async function sendAccountDeletionEmail(
+  email: string,
+  firstName: string,
+  scheduledDeletionDate: Date,
+  subscriptionEndDate: Date | null
+): Promise<EmailResult> {
+  const currentYear = new Date().getFullYear();
+  const formattedDeletionDate = scheduledDeletionDate.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  
+  const subscriptionInfo = subscriptionEndDate 
+    ? `<p class="message">Since you have an active subscription, your account will remain active until <strong>${subscriptionEndDate.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</strong>. After that date, your 30-day recovery period will begin.</p>`
+    : "";
+
+  const subject = "Your FairSign.io Account Deletion Request";
+
+  const htmlBody = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f5f5f5; }
+    .wrapper { width: 100%; background-color: #f5f5f5; padding: 40px 20px; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .header { background-color: #dc2626; padding: 30px; text-align: center; }
+    .header h1 { margin: 0; font-size: 24px; color: #ffffff; }
+    .content { padding: 40px 30px; }
+    .greeting { font-size: 20px; color: #333333; margin: 0 0 20px 0; }
+    .message { font-size: 15px; color: #555555; line-height: 1.6; margin: 0 0 20px 0; }
+    .warning-box { background-color: #fef3cd; border: 1px solid #ffc107; border-radius: 6px; padding: 20px; margin: 20px 0; }
+    .warning-title { font-size: 16px; color: #856404; font-weight: bold; margin: 0 0 10px 0; }
+    .warning-text { font-size: 14px; color: #856404; margin: 0; }
+    .info-box { background-color: #e3f2fd; border-radius: 6px; padding: 20px; margin: 20px 0; }
+    .info-title { font-size: 16px; color: #1565c0; font-weight: bold; margin: 0 0 10px 0; }
+    .info-text { font-size: 14px; color: #1565c0; margin: 0; }
+    .footer { background-color: #fafafa; padding: 20px 30px; text-align: center; border-top: 1px solid #eeeeee; }
+    .footer-text { font-size: 12px; color: #888888; margin: 0 0 10px 0; }
+    .footer-legal { font-size: 11px; color: #aaaaaa; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1 style="margin: 0; font-size: 24px; color: #ffffff;">Account Deletion Requested</h1>
+      </div>
+      <div class="content">
+        <h1 class="greeting">Hello ${firstName},</h1>
+        <p class="message">We've received your request to delete your FairSign.io account. We're sorry to see you go.</p>
+        
+        ${subscriptionInfo}
+        
+        <div class="warning-box">
+          <p class="warning-title">Your account and data will be permanently deleted on:</p>
+          <p class="warning-text" style="font-size: 18px; font-weight: bold;">${formattedDeletionDate}</p>
+        </div>
+        
+        <div class="info-box">
+          <p class="info-title">Want to restore your account?</p>
+          <p class="info-text">You can reactivate your account and restore access to all your documents within the 30-day recovery period by contacting us at <a href="mailto:support@fairsign.io" style="color: #1565c0;">support@fairsign.io</a></p>
+        </div>
+        
+        <p class="message">After the scheduled deletion date, your account and all associated documents will be permanently removed and cannot be recovered.</p>
+        
+        <p class="message">If you didn't request this deletion, please contact us immediately at <a href="mailto:support@fairsign.io">support@fairsign.io</a>.</p>
+      </div>
+      <div class="footer">
+        <p class="footer-text">This is an automated message from FairSign.io. Please do not reply to this email.</p>
+        <p class="footer-legal">&copy; ${currentYear} FairSign.io. All Rights Reserved.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+  `.trim();
+
+  return sendEmail({
+    emailType: "account_deletion",
+    toEmail: email,
+    subject,
+    htmlBody,
+  });
+}
+
+export async function sendTeamInvitationEmail(
+  inviteeEmail: string,
+  inviterName: string,
+  organizationName: string,
+  inviteToken: string
+): Promise<EmailResult> {
+  const appUrl = process.env.APP_URL || process.env.REPL_URL || "https://fairsign.io";
+  const inviteUrl = `${appUrl}/team-invite?token=${inviteToken}`;
+  const currentYear = new Date().getFullYear();
+
+  const subject = `${inviterName} invited you to join their team on FairSign.io`;
+  
+  const htmlBody = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Team Invitation</title>
+  <style>
+    body { margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5; }
+    .wrapper { width: 100%; background-color: #f5f5f5; padding: 40px 20px; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .header { background-color: #2563eb; padding: 30px; text-align: center; }
+    .header h1 { margin: 0; font-size: 24px; color: #ffffff; }
+    .content { padding: 40px 30px; }
+    .greeting { font-size: 20px; color: #333333; margin: 0 0 20px 0; }
+    .message { font-size: 15px; color: #555555; line-height: 1.6; margin: 0 0 20px 0; }
+    .button { display: inline-block; background-color: #2563eb; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 16px; margin: 10px 0; }
+    .button:hover { background-color: #1d4ed8; }
+    .button-container { text-align: center; margin: 30px 0; }
+    .info-box { background-color: #e3f2fd; border-radius: 6px; padding: 20px; margin: 20px 0; }
+    .info-title { font-size: 16px; color: #1565c0; font-weight: bold; margin: 0 0 10px 0; }
+    .info-text { font-size: 14px; color: #1565c0; margin: 0; }
+    .footer { background-color: #fafafa; padding: 20px 30px; text-align: center; border-top: 1px solid #eeeeee; }
+    .footer-text { font-size: 12px; color: #888888; margin: 0 0 10px 0; }
+    .footer-legal { font-size: 11px; color: #aaaaaa; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1 style="margin: 0; font-size: 24px; color: #ffffff;">Team Invitation</h1>
+      </div>
+      <div class="content">
+        <h1 class="greeting">You've been invited!</h1>
+        <p class="message"><strong>${inviterName}</strong> has invited you to join their team "${organizationName}" on FairSign.io.</p>
+        
+        <div class="info-box">
+          <p class="info-title">What does joining a team mean?</p>
+          <p class="info-text">As a team member, you'll have access to the shared document workspace. You can create, view, and manage documents alongside your team members.</p>
+        </div>
+        
+        <div class="button-container">
+          <a href="${inviteUrl}" class="button" style="color: #ffffff;">Join Team</a>
+        </div>
+        
+        <p class="message">This invitation will expire in 7 days. If you didn't expect this invitation, you can safely ignore this email.</p>
+      </div>
+      <div class="footer">
+        <p class="footer-text">This is an automated message from FairSign.io. Please do not reply to this email.</p>
+        <p class="footer-legal">&copy; ${currentYear} FairSign.io. All Rights Reserved.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+  `.trim();
+
+  return sendEmail({
+    emailType: "team_invitation",
+    toEmail: inviteeEmail,
     subject,
     htmlBody,
   });

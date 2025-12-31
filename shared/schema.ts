@@ -301,6 +301,46 @@ export const insertSystemSettingsSchema = createInsertSchema(systemSettings).omi
 export type SystemSetting = typeof systemSettings.$inferSelect;
 export type InsertSystemSetting = z.infer<typeof insertSystemSettingsSchema>;
 
+// Promo codes table - stores promo campaigns for subscription discounts
+export const promoCampaigns = pgTable("promo_campaigns", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  code: text("code").notNull().unique(), // User-facing code (e.g., "SUMMER25")
+  description: text("description"), // Admin notes
+  percentOff: integer("percent_off").notNull(), // Discount percentage (1-100)
+  stripeCouponId: text("stripe_coupon_id"), // Stripe Coupon ID
+  stripePromoCodeId: text("stripe_promo_code_id"), // Stripe Promotion Code ID
+  maxRedemptions: integer("max_redemptions"), // Null = unlimited
+  currentRedemptions: integer("current_redemptions").default(0).notNull(),
+  expiresAt: timestamp("expires_at"), // Null = never expires
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertPromoCampaignSchema = createInsertSchema(promoCampaigns).omit({ 
+  id: true, 
+  currentRedemptions: true, 
+  createdAt: true, 
+  updatedAt: true 
+});
+export type PromoCampaign = typeof promoCampaigns.$inferSelect;
+export type InsertPromoCampaign = z.infer<typeof insertPromoCampaignSchema>;
+
+// Admin settings - platform-wide settings for admin users
+export const adminSettings = pgTable("admin_settings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  displayCurrency: varchar("display_currency").default("EUR").notNull(), // EUR | USD | GBP
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  updatedBy: varchar("updated_by"), // Admin user ID who last updated
+});
+
+export const insertAdminSettingsSchema = createInsertSchema(adminSettings).omit({
+  id: true,
+  updatedAt: true,
+});
+export type AdminSettings = typeof adminSettings.$inferSelect;
+export type InsertAdminSettings = z.infer<typeof insertAdminSettingsSchema>;
+
 // API request/response schemas
 export const signerSchema = z.object({
   email: z.string().email(),

@@ -1,6 +1,6 @@
 # FairSign
 
-**FairSign** is an open-source document signing platform designed to be a fair, transparent, and self-hostable alternative to expensive corporate tools. It provides a complete e-signature solution for individuals and businesses, featuring HTML-to-PDF generation, secure signature capture, and audit-compliant workflows.  It was built on Replit.
+**FairSign** is an open-source document signing platform designed to be a fair, transparent, and self-hostable alternative to expensive corporate tools. It provides a complete e-signature solution for individuals and businesses, featuring HTML-to-PDF generation, secure signature capture, and audit-compliant workflows.
 
 ## Features
 
