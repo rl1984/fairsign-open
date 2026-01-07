@@ -14,6 +14,7 @@ interface ExtendedSpot extends SignatureSpot {
   label?: string;
   inputMode?: "any" | "text" | "numeric";
   placeholder?: string;
+  isDocumentDate?: boolean;
 }
 
 // Text field spot component with popover input
@@ -34,13 +35,45 @@ function TextFieldSpot({
   textValue?: string;
   onSubmit: (value: string) => void;
 }) {
-  const [inputValue, setInputValue] = useState(textValue || "");
+  // Format date as DD-MM-YYYY
+  const formatDateDDMMYYYY = (date: Date) => {
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    return `${day}-${month}-${year}`;
+  };
+  
+  // For document date fields, auto-populate with today's date in DD-MM-YYYY format
+  const getDocumentDateValue = () => {
+    if (spot.isDocumentDate) {
+      return formatDateDDMMYYYY(new Date());
+    }
+    return textValue || "";
+  };
+  
+  const [inputValue, setInputValue] = useState(getDocumentDateValue());
   const [open, setOpen] = useState(false);
-  const canEdit = isMySpot && !isCompleted;
+  const [autoSubmitted, setAutoSubmitted] = useState(false);
+  const canEdit = isMySpot && !isCompleted && !spot.isDocumentDate;
+  
+  // For document date fields, auto-submit the date when the spot first renders (once only)
+  useEffect(() => {
+    if (spot.isDocumentDate && isMySpot && !textValue && !isCompleted && !autoSubmitted) {
+      const dateStr = formatDateDDMMYYYY(new Date());
+      setAutoSubmitted(true);
+      onSubmit(dateStr);
+    }
+  }, [spot.isDocumentDate, isMySpot, textValue, isCompleted, autoSubmitted]);
 
   const handleSubmit = () => {
     if (inputValue.trim()) {
-      onSubmit(inputValue.trim());
+      // Convert YYYY-MM-DD from date picker to DD-MM-YYYY for storage/display
+      let valueToSubmit = inputValue.trim();
+      if (spot.kind === "date" && /^\d{4}-\d{2}-\d{2}$/.test(valueToSubmit)) {
+        const [year, month, day] = valueToSubmit.split('-');
+        valueToSubmit = `${day}-${month}-${year}`;
+      }
+      onSubmit(valueToSubmit);
       setOpen(false);
     }
   };
@@ -60,7 +93,9 @@ function TextFieldSpot({
     }
   };
 
-  const displayLabel = spot.placeholder || (spot.kind === "date" ? "Enter date" : "Enter text");
+  const displayLabel = spot.isDocumentDate 
+    ? "Signing Date (auto)" 
+    : (spot.placeholder || (spot.kind === "date" ? "Enter date" : "Enter text"));
   const inputType = spot.kind === "date" ? "date" : (spot.inputMode === "numeric" ? "tel" : "text");
 
   return (

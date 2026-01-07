@@ -6,10 +6,18 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, CheckCircle, Pencil, FileText, AlertCircle } from "lucide-react";
+import { Loader2, CheckCircle, Pencil, FileText, AlertCircle, ShieldCheck } from "lucide-react";
 import { PdfViewer } from "@/components/pdf-viewer";
 import { SignaturePad } from "@/components/signature-pad";
 import { SignatureQrModal } from "@/components/signature-qr-modal";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type { DocumentMetadata, SignatureSpot } from "@shared/schema";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 
@@ -29,6 +37,12 @@ export default function SigningPage() {
   const [showQrModal, setShowQrModal] = useState(false);
   const [qrSessionToken, setQrSessionToken] = useState<string>("");
   const [isCreatingSession, setIsCreatingSession] = useState(false);
+  
+  // Cached signatures for reuse across multiple fields
+  const [cachedSignature, setCachedSignature] = useState<string | null>(null);
+  const [cachedInitial, setCachedInitial] = useState<string | null>(null);
+  const [showReuseDialog, setShowReuseDialog] = useState(false);
+  const [isApplyingCached, setIsApplyingCached] = useState(false);
 
   const { data: docMetadata, isLoading, error } = useQuery<DocumentMetadata>({
     queryKey: ["/api/documents", params.id, token],
@@ -138,6 +152,28 @@ export default function SigningPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/documents", params.id] });
       const documentComplete = data?.documentStatus === "completed";
       setSigningComplete({ documentComplete });
+      
+      // Notify parent window for embedded signing integration
+      // Only send postMessage if this is an embedded document with allowed origins configured
+      if (window.parent !== window && docMetadata?.embeddedSigning && docMetadata?.allowedOrigins?.length) {
+        const message = {
+          type: "FAIRSIGN_COMPLETE",
+          documentId: params.id,
+          status: documentComplete ? "completed" : "signed",
+          redirectUrl: docMetadata.embeddedRedirectUrl || null,
+        };
+        
+        // Send to each allowed origin for security
+        // The parent must be from one of the allowed origins (enforced by CSP)
+        for (const origin of docMetadata.allowedOrigins) {
+          try {
+            window.parent.postMessage(message, origin);
+          } catch (e) {
+            // Origin doesn't match parent - that's expected for non-matching origins
+          }
+        }
+      }
+      
       toast({
         title: "Signing complete",
         description: documentComplete 
@@ -157,9 +193,17 @@ export default function SigningPage() {
   const handleSpotClick = useCallback((spot: SignatureSpot) => {
     if (!uploadedSpots.includes(spot.spotKey)) {
       setCurrentSpot(spot);
-      setShowSignaturePad(true);
+      
+      // Check if we have a cached signature of this type
+      const cached = spot.kind === "initial" ? cachedInitial : cachedSignature;
+      if (cached) {
+        // Show reuse dialog instead of signature pad
+        setShowReuseDialog(true);
+      } else {
+        setShowSignaturePad(true);
+      }
     }
-  }, [uploadedSpots]);
+  }, [uploadedSpots, cachedSignature, cachedInitial]);
 
   const handleTextSubmit = useCallback((spotKey: string, value: string) => {
     submitTextMutation.mutate({ spotKey, value });
@@ -168,10 +212,47 @@ export default function SigningPage() {
   const handleSignatureComplete = useCallback(async (dataUrl: string) => {
     if (!currentSpot) return;
 
+    // Cache the signature for reuse on subsequent fields of the same type
+    if (currentSpot.kind === "initial") {
+      setCachedInitial(dataUrl);
+    } else {
+      setCachedSignature(dataUrl);
+    }
+
     const res = await fetch(dataUrl);
     const blob = await res.blob();
     uploadSignatureMutation.mutate({ spotKey: currentSpot.spotKey, imageBlob: blob });
   }, [currentSpot, uploadSignatureMutation]);
+
+  // Handler for reusing a cached signature
+  const handleReuseCachedSignature = useCallback(async () => {
+    if (!currentSpot) return;
+    
+    const cached = currentSpot.kind === "initial" ? cachedInitial : cachedSignature;
+    if (!cached) return;
+
+    setIsApplyingCached(true);
+    try {
+      const res = await fetch(cached);
+      const blob = await res.blob();
+      uploadSignatureMutation.mutate({ spotKey: currentSpot.spotKey, imageBlob: blob });
+      setShowReuseDialog(false);
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to apply signature. Please try signing again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsApplyingCached(false);
+    }
+  }, [currentSpot, cachedSignature, cachedInitial, uploadSignatureMutation, toast]);
+
+  // Handler for drawing a new signature instead of reusing
+  const handleDrawNewSignature = useCallback(() => {
+    setShowReuseDialog(false);
+    setShowSignaturePad(true);
+  }, []);
 
   const handleComplete = useCallback(() => {
     if (!consentChecked) {
@@ -319,9 +400,18 @@ export default function SigningPage() {
       <header className="sticky top-0 z-50 bg-background border-b px-4 py-3">
         <div className="max-w-4xl mx-auto flex flex-col gap-2">
           <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
-              <FileText className="h-5 w-5 text-primary" />
+            <div className="flex items-center gap-2 flex-wrap">
+              <img src="/logo.png" alt="FairSign" className="h-5 w-5" />
               <span className="font-medium text-sm md:text-base">{docMetadata?.title || "Document"}</span>
+              {docMetadata?.senderVerified && (
+                <span 
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                  data-testid="badge-verified-sender"
+                >
+                  <ShieldCheck className="h-3 w-3" />
+                  Verified Sender
+                </span>
+              )}
             </div>
             <span className="text-sm text-muted-foreground" data-testid="text-progress">
               {completedCount} of {totalCount} completed
@@ -453,6 +543,60 @@ export default function SigningPage() {
         spotKey={currentSpot?.spotKey || ""}
         onSignatureComplete={handleQrSignatureComplete}
       />
+
+      {/* Reuse Signature Dialog */}
+      <Dialog open={showReuseDialog} onOpenChange={(open) => !open && setShowReuseDialog(false)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {currentSpot?.kind === "initial" ? "Use Your Initials" : "Use Your Signature"}
+            </DialogTitle>
+            <DialogDescription>
+              Would you like to use your {currentSpot?.kind === "initial" ? "initials" : "signature"} from earlier, or draw a new one?
+            </DialogDescription>
+          </DialogHeader>
+          
+          {/* Preview of cached signature */}
+          <div className="flex justify-center p-4 bg-muted rounded-lg">
+            <img
+              src={currentSpot?.kind === "initial" ? cachedInitial || "" : cachedSignature || ""}
+              alt={currentSpot?.kind === "initial" ? "Your initials" : "Your signature"}
+              className="max-h-24 max-w-full object-contain"
+            />
+          </div>
+          
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button
+              variant="outline"
+              onClick={handleDrawNewSignature}
+              disabled={isApplyingCached}
+              className="w-full sm:w-auto"
+              data-testid="button-draw-new"
+            >
+              <Pencil className="h-4 w-4 mr-2" />
+              Draw New
+            </Button>
+            <Button
+              onClick={handleReuseCachedSignature}
+              disabled={isApplyingCached}
+              className="w-full sm:w-auto"
+              data-testid="button-use-existing"
+            >
+              {isApplyingCached ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Applying...
+                </>
+              ) : (
+                <>
+                  <CheckCircle className="h-4 w-4 mr-2" />
+                  Use This {currentSpot?.kind === "initial" ? "Initial" : "Signature"}
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

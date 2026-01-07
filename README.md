@@ -132,13 +132,190 @@ S3_REGION=auto
 
 ## API Documentation
 
-### Documents
-- **List Documents**: `GET /api/admin/documents`
-- **Create Envelope**: `POST /api/admin/documents`
+### Authentication
 
-### Signing
-- **Retrieve Data**: `GET /api/sign/:token`
-- **Finalize Signature**: `POST /api/sign/:token/complete`
+FairSign supports two authentication methods for API access:
+
+#### 1. Session-Based Authentication
+Used by the web application. Requires login via the web interface.
+
+#### 2. API Key Authentication (Enterprise Only)
+
+For programmatic access from external applications, Enterprise users can create API keys.
+
+**API Key Format:** `fs_live_<64-character-random-string>`
+
+**Usage:**
+```bash
+curl -X POST https://your-fairsign-instance.com/api/admin/documents/from-template \
+  -H "Authorization: Bearer fs_live_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "templateId": "your-template-uuid",
+    "signers": [
+      { "name": "John Doe", "email": "john@example.com", "role": "tenant" }
+    ],
+    "sendEmail": true
+  }'
+```
+
+**API Key Security:**
+- Keys are SHA-256 hashed before storage (reveal-once on creation)
+- Keys are scoped to an organization
+- Requires active Enterprise subscription
+- Last-used timestamp is tracked for auditing
+
+---
+
+### Templates
+
+Templates are reusable document blueprints with pre-defined signature fields.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/admin/templates` | GET | List all templates for the authenticated user |
+| `/api/admin/templates` | POST | Create a new HTML template |
+| `/api/admin/templates/pdf` | POST | Upload a PDF template |
+| `/api/admin/templates/:id` | GET | Get template details |
+| `/api/admin/templates/:id` | PATCH | Update a template |
+| `/api/admin/templates/:id` | DELETE | Delete a template |
+| `/api/admin/templates/:id/fields` | GET | Get template fields |
+| `/api/admin/templates/:id/fields` | POST | Save template fields |
+
+---
+
+### Documents
+
+#### Create Document from Template
+
+Creates a new document from an existing template and sends signing invitations.
+
+```
+POST /api/admin/documents/from-template
+```
+
+**Request Body:**
+```json
+{
+  "templateId": "uuid-of-template",
+  "signers": [
+    {
+      "name": "John Doe",
+      "email": "john@example.com",
+      "role": "tenant",
+      "orderIndex": 0
+    }
+  ],
+  "creatorFieldValues": {
+    "field_api_tag": "pre-filled value"
+  },
+  "sendEmail": true
+}
+```
+
+**Response:**
+```json
+{
+  "documentId": "uuid-of-created-document",
+  "document_id": "uuid-of-created-document",
+  "signers": [
+    {
+      "email": "john@example.com",
+      "name": "John Doe",
+      "role": "tenant",
+      "signLink": "https://your-domain.com/d/{documentId}?token={signerToken}"
+    }
+  ],
+  "status": "created",
+  "emailsSent": true
+}
+```
+
+**Important IDs:**
+- **Template ID**: Used in the request to specify which template to use
+- **Document ID**: Returned in response, used for the signing page URL
+
+#### Create One-Off Document
+
+Upload a PDF directly without using a template.
+
+```
+POST /api/admin/documents/one-off
+Content-Type: multipart/form-data
+```
+
+**Form Fields:**
+- `pdf`: The PDF file to sign
+- `title`: Document title
+- `signers`: JSON array of signers
+- `fields`: JSON array of signature/field positions
+- `sendEmails`: "true" or "false"
+
+#### Other Document Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/admin/documents` | GET | List all documents |
+| `/api/admin/documents/:id` | GET | Get document details |
+| `/api/admin/documents/:id/archive` | POST | Archive a document |
+| `/api/admin/documents/:id/signers` | GET | Get document signers |
+
+---
+
+### Signing Endpoints
+
+These endpoints are used by signers (no authentication required, token-based):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/documents/:id?token=...` | GET | Get document data for signing |
+| `/api/documents/:id/signatures?token=...` | POST | Upload signature image |
+| `/api/documents/:id/text-field?token=...` | POST | Submit text field value |
+| `/api/documents/:id/complete?token=...` | POST | Complete signing |
+| `/api/documents/:id/unsigned.pdf?token=...` | GET | Download unsigned PDF |
+| `/api/documents/:id/signed.pdf?token=...` | GET | Download signed PDF |
+
+---
+
+### Webhooks
+
+FairSign sends webhook notifications when document status changes.
+
+**Events:**
+- `document.created` - Document created
+- `document.signed` - A signer completed their portion
+- `document.completed` - All signers have signed
+
+**Payload:**
+```json
+{
+  "event": "document.completed",
+  "documentId": "uuid",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "data": {
+    "status": "completed",
+    "signers": [...]
+  }
+}
+```
+
+**Verification:**
+Webhooks include an `X-FairSign-Signature` header for HMAC-SHA256 verification.
+
+---
+
+### BoldSign Compatibility Mode
+
+For integration with existing Property Management Systems expecting BoldSign API format, enable compatibility mode:
+
+```env
+WEBHOOK_COMPAT_MODE=boldsign
+INTERNAL_API_KEY=your-internal-api-key
+```
+
+**Compatible Endpoints:**
+- `GET /api/document/getEmbeddedSignLink?documentId=...&signerEmail=...`
+- `GET /api/document/download?documentId=...`
 
 ---
 

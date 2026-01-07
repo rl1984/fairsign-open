@@ -1,19 +1,24 @@
 import { 
   users, 
   storageCredentials, 
+  userS3Credentials,
   organizations, 
   organizationMembers, 
   organizationInvitations,
+  apiKeys,
   type User, 
   type UpsertUser, 
   type StorageCredentials, 
   type StorageProvider,
+  type UserS3Credentials,
   type Organization,
   type OrganizationMember,
   type OrganizationInvitation,
   type InsertOrganization,
   type InsertOrganizationMember,
   type InsertOrganizationInvitation,
+  type ApiKey,
+  type InsertApiKey,
 } from "@shared/models/auth";
 import { systemSettings } from "@shared/schema";
 import { db } from "../../db";
@@ -32,10 +37,16 @@ export interface StorageSettings {
 export interface IAuthStorage {
   getUser(id: string | number): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
+  getUserByGoogleId(googleId: string): Promise<User | undefined>;
+  getUserByMicrosoftId(microsoftId: string): Promise<User | undefined>;
   getUserByVerificationToken(token: string): Promise<User | undefined>;
   getUserByStripeSubscriptionId(subscriptionId: string): Promise<User | undefined>;
   getAllUsers(): Promise<User[]>;
   createUser(email: string, password: string, firstName?: string, lastName?: string, isAdmin?: boolean): Promise<User>;
+  createSSOUser(email: string, googleId: string, firstName?: string, lastName?: string, avatarUrl?: string): Promise<User>;
+  createMicrosoftSSOUser(email: string, microsoftId: string, firstName?: string, lastName?: string, avatarUrl?: string): Promise<User>;
+  linkGoogleAccount(userId: string, googleId: string, avatarUrl?: string): Promise<User | undefined>;
+  linkMicrosoftAccount(userId: string, microsoftId: string, avatarUrl?: string): Promise<User | undefined>;
   createUnverifiedUser(email: string, password: string, verificationToken: string, tokenExpiry: Date): Promise<User>;
   validatePassword(email: string, password: string): Promise<User | null>;
   updatePassword(userId: string, newPassword: string): Promise<void>;
@@ -45,6 +56,9 @@ export interface IAuthStorage {
   enableTwoFactor(userId: string, enabled: boolean): Promise<void>;
   verifyEmail(userId: string): Promise<User | undefined>;
   setVerificationToken(userId: string, token: string, expiry: Date): Promise<void>;
+  setPasswordResetToken(userId: string, token: string, expiry: Date): Promise<void>;
+  getUserByPasswordResetToken(token: string): Promise<User | undefined>;
+  clearPasswordResetToken(userId: string): Promise<void>;
   deleteUser(userId: string): Promise<void>;
   getStorageSettings(): Promise<StorageSettings>;
   saveStorageSettings(settings: StorageSettings): Promise<void>;
@@ -87,6 +101,30 @@ export interface IAuthStorage {
   // User organization helpers
   setUserOrganization(userId: string, organizationId: string | null): Promise<User | undefined>;
   getUserOrganization(userId: string): Promise<Organization | undefined>;
+  
+  // User custom S3 credentials
+  getUserS3Credentials(userId: string): Promise<UserS3Credentials | undefined>;
+  saveUserS3Credentials(credentials: Omit<UserS3Credentials, "id" | "createdAt" | "updatedAt">): Promise<UserS3Credentials>;
+  deleteUserS3Credentials(userId: string): Promise<void>;
+  updateUserS3LastTested(userId: string): Promise<void>;
+  
+  // Data residency
+  updateDataRegion(userId: string, dataRegion: "EU" | "US"): Promise<User | undefined>;
+  
+  // Embedded signing - allowed origins for iframe embedding (Enterprise feature)
+  updateAllowedOrigins(userId: string, origins: string[]): Promise<User | undefined>;
+  
+  // API usage tracking for Enterprise quota enforcement
+  incrementApiUsage(userId: string): Promise<void>;
+  resetApiUsage(userId: string, newBillingPeriodStart: Date): Promise<void>;
+  setApiQuotaLimit(userId: string, limit: number, billingPeriodStart?: Date): Promise<void>;
+  
+  // API Keys for programmatic access (Enterprise feature)
+  createApiKey(data: InsertApiKey): Promise<ApiKey>;
+  getApiKeysByOrganization(organizationId: string): Promise<ApiKey[]>;
+  getApiKeyByPrefix(keyPrefix: string): Promise<ApiKey | undefined>;
+  deleteApiKey(id: string): Promise<void>;
+  updateApiKeyLastUsed(id: string): Promise<void>;
 }
 
 class AuthStorage implements IAuthStorage {
@@ -113,6 +151,84 @@ class AuthStorage implements IAuthStorage {
 
   async getUserByEmail(email: string): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.email, email.toLowerCase()));
+    return user;
+  }
+
+  async getUserByGoogleId(googleId: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.googleId, googleId));
+    return user;
+  }
+
+  async createSSOUser(
+    email: string,
+    googleId: string,
+    firstName?: string,
+    lastName?: string,
+    avatarUrl?: string
+  ): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values({
+        email: email.toLowerCase(),
+        googleId,
+        firstName,
+        lastName,
+        avatarUrl,
+        emailVerified: true, // Google verifies the email
+      })
+      .returning();
+    return user;
+  }
+
+  async linkGoogleAccount(userId: string, googleId: string, avatarUrl?: string): Promise<User | undefined> {
+    const [user] = await db
+      .update(users)
+      .set({ 
+        googleId, 
+        avatarUrl: avatarUrl || undefined,
+        updatedAt: new Date() 
+      })
+      .where(eq(users.id, userId))
+      .returning();
+    return user;
+  }
+
+  async getUserByMicrosoftId(microsoftId: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.microsoftId, microsoftId));
+    return user;
+  }
+
+  async createMicrosoftSSOUser(
+    email: string,
+    microsoftId: string,
+    firstName?: string,
+    lastName?: string,
+    avatarUrl?: string
+  ): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values({
+        email: email.toLowerCase(),
+        microsoftId,
+        firstName,
+        lastName,
+        avatarUrl,
+        emailVerified: true, // Microsoft verifies the email
+      })
+      .returning();
+    return user;
+  }
+
+  async linkMicrosoftAccount(userId: string, microsoftId: string, avatarUrl?: string): Promise<User | undefined> {
+    const [user] = await db
+      .update(users)
+      .set({ 
+        microsoftId, 
+        avatarUrl: avatarUrl || undefined,
+        updatedAt: new Date() 
+      })
+      .where(eq(users.id, userId))
+      .returning();
     return user;
   }
 
@@ -170,6 +286,9 @@ class AuthStorage implements IAuthStorage {
   async validatePassword(email: string, password: string): Promise<User | null> {
     const user = await this.getUserByEmail(email);
     if (!user) return null;
+    
+    // SSO-only users don't have a password
+    if (!user.passwordHash) return null;
     
     const isValid = await bcrypt.compare(password, user.passwordHash);
     return isValid ? user : null;
@@ -230,6 +349,33 @@ class AuthStorage implements IAuthStorage {
       .set({
         emailVerificationToken: token,
         emailVerificationExpiry: expiry,
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, userId));
+  }
+
+  async setPasswordResetToken(userId: string, token: string, expiry: Date): Promise<void> {
+    await db
+      .update(users)
+      .set({
+        passwordResetToken: token,
+        passwordResetExpiry: expiry,
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, userId));
+  }
+
+  async getUserByPasswordResetToken(token: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.passwordResetToken, token));
+    return user;
+  }
+
+  async clearPasswordResetToken(userId: string): Promise<void> {
+    await db
+      .update(users)
+      .set({
+        passwordResetToken: null,
+        passwordResetExpiry: null,
         updatedAt: new Date(),
       })
       .where(eq(users.id, userId));
@@ -553,6 +699,121 @@ class AuthStorage implements IAuthStorage {
       return undefined;
     }
     return this.getOrganization(user.organizationId);
+  }
+
+  // User custom S3 credentials
+  async getUserS3Credentials(userId: string): Promise<UserS3Credentials | undefined> {
+    const [cred] = await db
+      .select()
+      .from(userS3Credentials)
+      .where(eq(userS3Credentials.userId, userId));
+    return cred;
+  }
+
+  async saveUserS3Credentials(credentials: Omit<UserS3Credentials, "id" | "createdAt" | "updatedAt">): Promise<UserS3Credentials> {
+    const existing = await this.getUserS3Credentials(credentials.userId);
+    if (existing) {
+      const [updated] = await db
+        .update(userS3Credentials)
+        .set({ ...credentials, updatedAt: new Date() })
+        .where(eq(userS3Credentials.id, existing.id))
+        .returning();
+      return updated;
+    }
+    const [created] = await db.insert(userS3Credentials).values(credentials).returning();
+    return created;
+  }
+
+  async deleteUserS3Credentials(userId: string): Promise<void> {
+    await db.delete(userS3Credentials).where(eq(userS3Credentials.userId, userId));
+  }
+
+  async updateUserS3LastTested(userId: string): Promise<void> {
+    await db
+      .update(userS3Credentials)
+      .set({ lastTestedAt: new Date(), updatedAt: new Date() })
+      .where(eq(userS3Credentials.userId, userId));
+  }
+
+  async updateDataRegion(userId: string, dataRegion: "EU" | "US"): Promise<User | undefined> {
+    const [user] = await db
+      .update(users)
+      .set({ dataRegion, updatedAt: new Date() })
+      .where(eq(users.id, userId))
+      .returning();
+    return user;
+  }
+  
+  async updateAllowedOrigins(userId: string, origins: string[]): Promise<User | undefined> {
+    const [user] = await db
+      .update(users)
+      .set({ allowedOrigins: origins, updatedAt: new Date() })
+      .where(eq(users.id, userId))
+      .returning();
+    return user;
+  }
+  
+  // API usage tracking for Enterprise quota enforcement
+  async incrementApiUsage(userId: string): Promise<void> {
+    const user = await this.getUser(userId);
+    if (!user) return;
+    
+    const newCount = (user.apiCallsCount || 0) + 1;
+    await db
+      .update(users)
+      .set({ apiCallsCount: newCount, updatedAt: new Date() })
+      .where(eq(users.id, userId));
+  }
+  
+  async resetApiUsage(userId: string, newBillingPeriodStart: Date): Promise<void> {
+    await db
+      .update(users)
+      .set({ 
+        apiCallsCount: 0, 
+        billingPeriodStart: newBillingPeriodStart,
+        updatedAt: new Date() 
+      })
+      .where(eq(users.id, userId));
+  }
+  
+  async setApiQuotaLimit(userId: string, limit: number, billingPeriodStart?: Date): Promise<void> {
+    const updates: any = { 
+      apiQuotaLimit: limit, 
+      updatedAt: new Date() 
+    };
+    
+    if (billingPeriodStart) {
+      updates.billingPeriodStart = billingPeriodStart;
+      updates.apiCallsCount = 0; // Reset count when billing period starts
+    }
+    
+    await db
+      .update(users)
+      .set(updates)
+      .where(eq(users.id, userId));
+  }
+  
+  // API Keys for programmatic access (Enterprise feature)
+  async createApiKey(data: InsertApiKey): Promise<ApiKey> {
+    const [apiKey] = await db.insert(apiKeys).values(data).returning();
+    return apiKey;
+  }
+  
+  async getApiKeysByOrganization(organizationId: string): Promise<ApiKey[]> {
+    return db.select().from(apiKeys).where(eq(apiKeys.organizationId, organizationId));
+  }
+  
+  async getApiKeyByPrefix(keyPrefix: string): Promise<ApiKey | undefined> {
+    const [apiKey] = await db.select().from(apiKeys).where(eq(apiKeys.keyPrefix, keyPrefix));
+    return apiKey;
+  }
+  
+  async deleteApiKey(id: string): Promise<void> {
+    await db.delete(apiKeys).where(eq(apiKeys.id, id));
+  }
+  
+  async updateApiKeyLastUsed(id: string): Promise<void> {
+    await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, id));
   }
 }
 

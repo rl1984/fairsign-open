@@ -40,6 +40,7 @@ interface PlacedField {
   placeholder?: string;
   creatorFills?: boolean;
   creatorValue?: string;
+  isDocumentDate?: boolean;
 }
 
 const SIGNER_COLORS = [
@@ -263,6 +264,7 @@ export default function OneOffDocument() {
           placeholder: "",
           creatorFills: false,
           creatorValue: "",
+          isDocumentDate: false,
         };
 
         setFields([...fields, newField]);
@@ -486,11 +488,20 @@ export default function OneOffDocument() {
     setIsSending(true);
 
     try {
+      // Convert date values from YYYY-MM-DD (browser format) to DD-MM-YYYY
+      const convertedFields = fields.map(field => {
+        if (field.fieldType === "date" && field.creatorValue && /^\d{4}-\d{2}-\d{2}$/.test(field.creatorValue)) {
+          const [year, month, day] = field.creatorValue.split('-');
+          return { ...field, creatorValue: `${day}-${month}-${year}` };
+        }
+        return field;
+      });
+
       const formData = new FormData();
       formData.append("pdf", pdfFile!);
       formData.append("title", documentTitle);
       formData.append("signers", JSON.stringify(signers));
-      formData.append("fields", JSON.stringify(fields));
+      formData.append("fields", JSON.stringify(convertedFields));
       formData.append("sendEmails", sendEmails ? "true" : "false");
 
       const res = await fetch("/api/admin/documents/one-off", {
@@ -835,6 +846,11 @@ export default function OneOffDocument() {
                               Creator
                             </Badge>
                           )}
+                          {field.isDocumentDate && (
+                            <Badge variant="outline" className="text-[10px] px-1 py-0">
+                              Doc Date
+                            </Badge>
+                          )}
                         </div>
                         {/* Show creatorValue or placeholder inside field for text/date fields */}
                         {(field.fieldType === "text" || field.fieldType === "date") && (field.creatorFills ? field.creatorValue : field.placeholder) && (
@@ -1104,16 +1120,37 @@ export default function OneOffDocument() {
                           onCheckedChange={(checked) => {
                             setFields(fields.map(f => 
                               f.id === selectedField.id 
-                                ? { ...f, creatorFills: !!checked, creatorValue: "" }
+                                ? { ...f, creatorFills: !!checked, creatorValue: "", isDocumentDate: checked ? false : f.isDocumentDate }
                                 : f
                             ));
                           }}
+                          disabled={selectedField.isDocumentDate}
                           data-testid="checkbox-creator-fills"
                         />
                         <Label htmlFor="creatorFills" className="text-sm font-normal cursor-pointer">
                           Creator fills at document creation
                         </Label>
                       </div>
+
+                      {selectedField.fieldType === "date" && (
+                        <div className="flex items-center gap-2 pt-2">
+                          <Checkbox
+                            id="isDocumentDate"
+                            checked={selectedField.isDocumentDate || false}
+                            onCheckedChange={(checked) => {
+                              setFields(fields.map(f => 
+                                f.id === selectedField.id 
+                                  ? { ...f, isDocumentDate: !!checked, creatorFills: checked ? false : f.creatorFills, creatorValue: checked ? "" : f.creatorValue }
+                                  : f
+                              ));
+                            }}
+                            data-testid="checkbox-document-date"
+                          />
+                          <Label htmlFor="isDocumentDate" className="text-sm font-normal cursor-pointer">
+                            Auto-fill with signing date
+                          </Label>
+                        </div>
+                      )}
 
                       {selectedField.creatorFills && (
                         <div className="space-y-1 pt-2">

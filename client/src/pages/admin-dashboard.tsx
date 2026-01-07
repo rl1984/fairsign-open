@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useLocation } from "wouter";
+import { useLocation, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/user-avatar";
 import {
   Dialog,
   DialogContent,
@@ -34,7 +34,6 @@ import {
   Plus,
   RefreshCw,
   Eye,
-  LayoutDashboard,
   Upload,
   Users,
   Settings,
@@ -53,8 +52,10 @@ import TwoFactorSetup from "@/components/two-factor-setup";
 import { StorageSettings } from "@/components/storage-settings";
 import { TemplatesManagement } from "@/components/templates-management";
 import { ProfileSettings } from "@/components/profile-settings";
+import { GuidesManagement } from "@/components/guides-management";
 import { SubscriptionManagement } from "@/components/subscription-management";
-import { HardDrive, CreditCard, Crown, Zap, Sparkles, TrendingUp, DollarSign } from "lucide-react";
+import { IdentityVerification } from "@/components/identity-verification";
+import { HardDrive, CreditCard, Crown, Zap, Sparkles, TrendingUp, DollarSign, Receipt, ShieldCheck, BookOpen } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -81,6 +82,12 @@ interface AdminStats {
 interface AdminSettingsData {
   id: string | null;
   displayCurrency: string;
+  companyName: string | null;
+  companyAddress: string | null;
+  companyVatId: string | null;
+  companyEmail: string | null;
+  companyPhone: string | null;
+  companyLogoKey: string | null;
   updatedAt: string | null;
   updatedBy: string | null;
 }
@@ -180,6 +187,286 @@ function GrowthChart({
               />
             </AreaChart>
           </ResponsiveContainer>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Invoice Settings Component for Admin Dashboard
+function InvoiceSettings({ 
+  settings, 
+  onSave,
+  isSaving
+}: { 
+  settings: AdminSettingsData | undefined;
+  onSave: (data: Partial<{
+    companyName: string;
+    companyAddress: string;
+    companyVatId: string;
+    companyEmail: string;
+    companyPhone: string;
+  }>) => void;
+  isSaving: boolean;
+}) {
+  const { toast } = useToast();
+  const [companyName, setCompanyName] = useState(settings?.companyName || "");
+  const [companyAddress, setCompanyAddress] = useState(settings?.companyAddress || "");
+  const [companyVatId, setCompanyVatId] = useState(settings?.companyVatId || "");
+  const [companyEmail, setCompanyEmail] = useState(settings?.companyEmail || "");
+  const [companyPhone, setCompanyPhone] = useState(settings?.companyPhone || "");
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+
+  useEffect(() => {
+    setCompanyName(settings?.companyName || "");
+    setCompanyAddress(settings?.companyAddress || "");
+    setCompanyVatId(settings?.companyVatId || "");
+    setCompanyEmail(settings?.companyEmail || "");
+    setCompanyPhone(settings?.companyPhone || "");
+  }, [settings]);
+
+  useEffect(() => {
+    if (settings?.companyLogoKey) {
+      fetch("/api/ee/admin/settings/logo")
+        .then(res => res.json())
+        .then(data => {
+          if (data.url) setLogoUrl(data.url);
+        })
+        .catch(() => {});
+    }
+  }, [settings?.companyLogoKey]);
+
+  const handleSave = () => {
+    onSave({
+      companyName,
+      companyAddress,
+      companyVatId,
+      companyEmail,
+      companyPhone,
+    });
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 2 * 1024 * 1024) {
+      toast({
+        title: "File too large",
+        description: "Logo must be under 2MB",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsUploadingLogo(true);
+    const formData = new FormData();
+    formData.append("logo", file);
+
+    try {
+      const res = await fetch("/api/ee/admin/settings/logo", {
+        method: "POST",
+        body: formData,
+      });
+      
+      if (!res.ok) throw new Error("Upload failed");
+      
+      const data = await res.json();
+      toast({
+        title: "Logo uploaded",
+        description: "Company logo has been updated.",
+      });
+      
+      // Refresh logo URL
+      const logoRes = await fetch("/api/ee/admin/settings/logo");
+      const logoData = await logoRes.json();
+      if (logoData.url) setLogoUrl(logoData.url);
+      
+      queryClient.invalidateQueries({ queryKey: ["/api/ee/admin/settings"] });
+    } catch (error) {
+      toast({
+        title: "Upload failed",
+        description: "Could not upload company logo.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsUploadingLogo(false);
+    }
+  };
+
+  const handleDeleteLogo = async () => {
+    try {
+      const res = await fetch("/api/ee/admin/settings/logo", {
+        method: "DELETE",
+      });
+      
+      if (!res.ok) throw new Error("Delete failed");
+      
+      setLogoUrl(null);
+      toast({
+        title: "Logo removed",
+        description: "Company logo has been deleted.",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/ee/admin/settings"] });
+    } catch (error) {
+      toast({
+        title: "Delete failed",
+        description: "Could not delete company logo.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <FileText className="h-5 w-5" />
+          Invoice Settings
+        </CardTitle>
+        <CardDescription>
+          Configure your company details for professional invoices. These details appear on all invoices sent to customers.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="company-logo">Company Logo</Label>
+            <p className="text-sm text-muted-foreground">
+              Upload your company logo (max 2MB, PNG, JPG, or SVG)
+            </p>
+            <div className="flex items-center gap-4">
+              {logoUrl ? (
+                <div className="relative">
+                  <img 
+                    src={logoUrl} 
+                    alt="Company Logo" 
+                    className="h-16 w-auto max-w-32 object-contain border rounded-md"
+                    data-testid="img-company-logo"
+                  />
+                  <Button
+                    variant="destructive"
+                    size="icon"
+                    className="absolute -top-2 -right-2 h-6 w-6"
+                    onClick={handleDeleteLogo}
+                    data-testid="button-delete-logo"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="h-16 w-32 border-2 border-dashed rounded-md flex items-center justify-center text-muted-foreground text-sm">
+                  No logo
+                </div>
+              )}
+              <div>
+                <input
+                  type="file"
+                  id="logo-upload"
+                  accept="image/*"
+                  onChange={handleLogoUpload}
+                  className="hidden"
+                  data-testid="input-logo-upload"
+                />
+                <label htmlFor="logo-upload">
+                  <Button 
+                    variant="outline" 
+                    disabled={isUploadingLogo}
+                    asChild
+                  >
+                    <span className="cursor-pointer">
+                      {isUploadingLogo ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Uploading...
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="h-4 w-4 mr-2" />
+                          Upload Logo
+                        </>
+                      )}
+                    </span>
+                  </Button>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="company-name">Company Name</Label>
+              <Input
+                id="company-name"
+                value={companyName}
+                onChange={(e) => setCompanyName(e.target.value)}
+                placeholder="Your Company Inc."
+                data-testid="input-company-name"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="company-vat">VAT/Tax ID</Label>
+              <Input
+                id="company-vat"
+                value={companyVatId}
+                onChange={(e) => setCompanyVatId(e.target.value)}
+                placeholder="VAT12345678"
+                data-testid="input-company-vat"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="company-address">Company Address</Label>
+            <textarea
+              id="company-address"
+              value={companyAddress}
+              onChange={(e) => setCompanyAddress(e.target.value)}
+              placeholder="123 Business Street&#10;City, State 12345&#10;Country"
+              className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              data-testid="textarea-company-address"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="company-email">Contact Email</Label>
+              <Input
+                id="company-email"
+                type="email"
+                value={companyEmail}
+                onChange={(e) => setCompanyEmail(e.target.value)}
+                placeholder="billing@company.com"
+                data-testid="input-company-email"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="company-phone">Contact Phone</Label>
+              <Input
+                id="company-phone"
+                value={companyPhone}
+                onChange={(e) => setCompanyPhone(e.target.value)}
+                placeholder="+1 (555) 123-4567"
+                data-testid="input-company-phone"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <Button onClick={handleSave} disabled={isSaving} data-testid="button-save-invoice-settings">
+            {isSaving ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              "Save Invoice Settings"
+            )}
+          </Button>
         </div>
       </CardContent>
     </Card>
@@ -427,6 +714,131 @@ function DocumentCompletionChart({
   );
 }
 
+interface ApiUsageData {
+  daily: { date: string; count: number; cumulative: number }[];
+  total: number;
+  byEndpoint: { endpoint: string; count: number }[];
+}
+
+function ApiUsageChart({ 
+  color = "hsl(220 70% 50%)"
+}: { 
+  color?: string;
+}) {
+  const [timeRange, setTimeRange] = useState<TimeRange>("30d");
+  const [chartMode, setChartMode] = useState<ChartMode>("daily");
+
+  const { data: usageData, isLoading } = useQuery<ApiUsageData>({
+    queryKey: ['/api/ee/admin/api-usage', { timeRange }],
+    queryFn: () => fetch(`/api/ee/admin/api-usage?timeRange=${timeRange}`).then(res => res.json()),
+  });
+
+  const chartData = (usageData?.daily || []).map((d) => {
+    const formattedDate = new Date(d.date).toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: timeRange === "1y" || timeRange === "all" ? '2-digit' : undefined
+    });
+    
+    return { 
+      date: formattedDate, 
+      count: chartMode === "cumulative" ? d.cumulative : d.count 
+    };
+  });
+
+  const timeRangeLabels: Record<TimeRange, string> = {
+    "7d": "7 Days",
+    "30d": "30 Days", 
+    "90d": "90 Days",
+    "1y": "1 Year",
+    "all": "All Time",
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <CardTitle className="text-base">API Usage</CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Select value={timeRange} onValueChange={(val) => setTimeRange(val as TimeRange)}>
+              <SelectTrigger className="w-[110px]" data-testid="select-api-time-range">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="7d">7 Days</SelectItem>
+                <SelectItem value="30d">30 Days</SelectItem>
+                <SelectItem value="90d">90 Days</SelectItem>
+                <SelectItem value="1y">1 Year</SelectItem>
+                <SelectItem value="all">All Time</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={chartMode} onValueChange={(val) => setChartMode(val as ChartMode)}>
+              <SelectTrigger className="w-[120px]" data-testid="select-api-chart-mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="daily">Daily</SelectItem>
+                <SelectItem value="cumulative">Cumulative</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {chartMode === "cumulative" ? "Total API calls over time" : "API calls per day"} ({timeRangeLabels[timeRange]})
+          {usageData && <span className="ml-2 font-medium">Total: {usageData.total.toLocaleString()}</span>}
+        </p>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="h-[200px] flex items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : chartData.length === 0 ? (
+          <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+            No API calls recorded yet
+          </div>
+        ) : (
+          <div className="h-[200px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                <XAxis 
+                  dataKey="date" 
+                  fontSize={10} 
+                  tickLine={false}
+                  axisLine={false}
+                  interval="preserveStartEnd"
+                />
+                <YAxis 
+                  fontSize={12} 
+                  tickLine={false}
+                  axisLine={false}
+                  allowDecimals={false}
+                />
+                <Tooltip 
+                  contentStyle={{
+                    backgroundColor: 'hsl(var(--card))',
+                    border: '1px solid hsl(var(--border))',
+                    borderRadius: '6px',
+                  }}
+                  formatter={(value: number) => [value, chartMode === "cumulative" ? "Total Calls" : "API Calls"]}
+                />
+                <Area 
+                  type="monotone" 
+                  dataKey="count" 
+                  stroke={color}
+                  fill={color}
+                  fillOpacity={0.2}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 interface DocumentWithDetails extends Document {
   signatureAssets?: SignatureAsset[];
   auditEvents?: AuditEvent[];
@@ -500,11 +912,11 @@ function PromoCodesManagement() {
     }) => {
       return apiRequest("POST", "/api/ee/admin/promo-codes", data);
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       toast({ title: "Promo code created successfully" });
       setIsCreateDialogOpen(false);
       resetForm();
-      refetch();
+      await queryClient.invalidateQueries({ queryKey: ["/api/ee/admin/promo-codes"] });
     },
     onError: (error: any) => {
       toast({
@@ -519,9 +931,9 @@ function PromoCodesManagement() {
     mutationFn: async ({ id, isActive }: { id: string; isActive: boolean }) => {
       return apiRequest("PATCH", `/api/ee/admin/promo-codes/${id}`, { isActive });
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       toast({ title: "Promo code updated" });
-      refetch();
+      await queryClient.invalidateQueries({ queryKey: ["/api/ee/admin/promo-codes"] });
     },
     onError: () => {
       toast({ title: "Failed to update promo code", variant: "destructive" });
@@ -532,9 +944,9 @@ function PromoCodesManagement() {
     mutationFn: async (id: string) => {
       return apiRequest("DELETE", `/api/ee/admin/promo-codes/${id}`);
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       toast({ title: "Promo code deleted" });
-      refetch();
+      await queryClient.invalidateQueries({ queryKey: ["/api/ee/admin/promo-codes"] });
     },
     onError: () => {
       toast({ title: "Failed to delete promo code", variant: "destructive" });
@@ -771,6 +1183,29 @@ export default function AdminDashboard() {
       setRoleInitialized(true);
     }
   }, [user, lastKnownRole]);
+
+  // Handle URL parameters for tab selection and verification completion
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get("tab");
+    const verificationParam = params.get("verification");
+    
+    if (tabParam) {
+      setSelectedTab(tabParam);
+    }
+    
+    if (verificationParam === "complete") {
+      toast({
+        title: "Verification Submitted",
+        description: "Your identity verification is being processed. This usually takes a few minutes.",
+      });
+      // Remove query parameters from URL
+      window.history.replaceState({}, "", "/dashboard" + (tabParam ? `?tab=${tabParam}` : ""));
+      // Refresh identity status
+      queryClient.invalidateQueries({ queryKey: ["/api/ee/identity/status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ee/identity/eligibility"] });
+    }
+  }, [toast]);
   
   // Compute the resolved tab based on user role and selection
   const getDefaultTabForRole = (isAdmin: boolean) => isAdmin ? "overview" : "documents";
@@ -820,7 +1255,8 @@ export default function AdminDashboard() {
     enabled: isAuthenticated,
   });
 
-  const isPro = subscription?.accountType === "pro";
+  const isPro = subscription?.accountType === "pro" || subscription?.accountType === "enterprise";
+  const isEnterprise = subscription?.accountType === "enterprise";
 
   // Admin-only queries for analytics and settings
   const { data: adminStats, isLoading: statsLoading } = useQuery<AdminStats>({
@@ -836,7 +1272,14 @@ export default function AdminDashboard() {
   const displayCurrency = adminSettings?.displayCurrency || "EUR";
 
   const updateSettingsMutation = useMutation({
-    mutationFn: async (data: { displayCurrency: string }) => {
+    mutationFn: async (data: Partial<{
+      displayCurrency: string;
+      companyName: string;
+      companyAddress: string;
+      companyVatId: string;
+      companyEmail: string;
+      companyPhone: string;
+    }>) => {
       return apiRequest("PATCH", "/api/ee/admin/settings", data);
     },
     onSuccess: () => {
@@ -1040,29 +1483,14 @@ export default function AdminDashboard() {
       <header className="border-b bg-card sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <LayoutDashboard className="h-6 w-6 text-primary" />
+            <img src="/logo.png" alt="FairSign" className="h-8 w-8" />
             <h1 className="text-lg font-semibold">FairSign</h1>
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
-            {isPro && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => window.location.href = "/bulk-import"}
-                data-testid="button-nav-bulk-import"
-              >
-                <Upload className="h-4 w-4 mr-1" />
-                Bulk Import
-              </Button>
-            )}
             {user && (
               <div className="flex items-center gap-2">
-                <Avatar className="h-8 w-8">
-                  <AvatarFallback>
-                    {user.firstName?.[0]}{user.lastName?.[0]}
-                  </AvatarFallback>
-                </Avatar>
+                <UserAvatar user={user} />
                 <span className="text-sm hidden sm:inline" data-testid="text-user-name">
                   {user.firstName} {user.lastName}
                 </span>
@@ -1162,6 +1590,12 @@ export default function AdminDashboard() {
                 </TabsTrigger>
               )}
               {effectiveRole && (
+                <TabsTrigger value="guides" data-testid="tab-guides">
+                  <FileText className="h-4 w-4 mr-2" />
+                  Guides
+                </TabsTrigger>
+              )}
+              {effectiveRole && (
                 <TabsTrigger value="admin-settings" data-testid="tab-admin-settings">
                   <Settings className="h-4 w-4 mr-2" />
                   Settings
@@ -1200,6 +1634,26 @@ export default function AdminDashboard() {
                 >
                   <Plus className="h-4 w-4 mr-2" />
                   New Document
+                </Button>
+                {isEnterprise && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setLocation("/bulk-send")}
+                    data-testid="button-bulk-send"
+                  >
+                    <Users className="h-4 w-4 mr-2" />
+                    Bulk Send
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setLocation("/guides")}
+                  data-testid="button-help-guides"
+                >
+                  <BookOpen className="h-4 w-4 mr-2" />
+                  Help
                 </Button>
               </div>
             )}
@@ -1500,6 +1954,10 @@ export default function AdminDashboard() {
                     <UserGrowthChart color="hsl(var(--primary))" />
                     <DocumentCompletionChart color="hsl(142 76% 36%)" />
                   </div>
+
+                  <div className="grid gap-4 md:grid-cols-1">
+                    <ApiUsageChart color="hsl(220 70% 50%)" />
+                  </div>
                 </>
               )}
             </TabsContent>
@@ -1528,16 +1986,121 @@ export default function AdminDashboard() {
           {!effectiveRole && (
             <TabsContent value="settings">
               <div className="space-y-6">
+                {/* Profile Settings */}
                 <ProfileSettings />
                 
-                <div>
-                  <h2 className="text-lg font-semibold mb-2">Account Security</h2>
-                  <p className="text-sm text-muted-foreground mb-4">Manage your account security settings</p>
-                </div>
-                <TwoFactorSetup
-                  isEnabled={user?.twoFactorEnabled || false}
-                  onUpdate={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] })}
-                />
+                {/* Account Security */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <ShieldCheck className="h-5 w-5" />
+                      Account Security
+                    </CardTitle>
+                    <CardDescription>
+                      Manage your account security settings
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <TwoFactorSetup
+                      isEnabled={user?.twoFactorEnabled || false}
+                      onUpdate={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] })}
+                    />
+                  </CardContent>
+                </Card>
+
+                {/* Identity Verification - Pro feature */}
+                <IdentityVerification />
+
+                {/* Team Management - Pro feature */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Users className="h-5 w-5" />
+                      Team Management
+                      <Crown className="h-4 w-4 text-yellow-500" />
+                    </CardTitle>
+                    <CardDescription>
+                      Collaborate with your team members
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {isPro ? (
+                      <Link href="/team-settings">
+                        <Button variant="outline" data-testid="button-team-settings">
+                          <Users className="h-4 w-4 mr-2" />
+                          Manage Team
+                        </Button>
+                      </Link>
+                    ) : (
+                      <div className="text-sm text-muted-foreground">
+                        <p className="mb-3">Invite team members to collaborate on documents and share templates.</p>
+                        <Link href="/dashboard?tab=subscription">
+                          <Button variant="outline" size="sm" data-testid="button-upgrade-team">
+                            <Crown className="h-4 w-4 mr-2 text-yellow-500" />
+                            Upgrade to Pro
+                          </Button>
+                        </Link>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Storage & Data - Pro feature */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <HardDrive className="h-5 w-5" />
+                      Storage & Data
+                      <Crown className="h-4 w-4 text-yellow-500" />
+                    </CardTitle>
+                    <CardDescription>
+                      Manage where your documents are stored
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {isPro ? (
+                      <Link href="/storage-settings">
+                        <Button variant="outline" data-testid="button-storage-settings">
+                          <HardDrive className="h-4 w-4 mr-2" />
+                          Storage Settings
+                        </Button>
+                      </Link>
+                    ) : (
+                      <div className="text-sm text-muted-foreground">
+                        <p className="mb-3">Connect your own storage (S3, Google Drive, Dropbox) and choose your data region.</p>
+                        <Link href="/dashboard?tab=subscription">
+                          <Button variant="outline" size="sm" data-testid="button-upgrade-storage">
+                            <Crown className="h-4 w-4 mr-2 text-yellow-500" />
+                            Upgrade to Pro
+                          </Button>
+                        </Link>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Billing & Invoices - only for Pro users */}
+                {isPro && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        <Receipt className="h-5 w-5" />
+                        Billing & Invoices
+                      </CardTitle>
+                      <CardDescription>
+                        View your subscription and download invoices
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <Link href="/billing">
+                        <Button variant="outline" data-testid="button-billing">
+                          <Receipt className="h-4 w-4 mr-2" />
+                          View Billing
+                        </Button>
+                      </Link>
+                    </CardContent>
+                  </Card>
+                )}
               </div>
             </TabsContent>
           )}
@@ -1548,44 +2111,59 @@ export default function AdminDashboard() {
             </TabsContent>
           )}
 
+          {/* Guides Management tab */}
+          {effectiveRole && (
+            <TabsContent value="guides">
+              <GuidesManagement />
+            </TabsContent>
+          )}
+
           {/* Admin Settings tab */}
           {effectiveRole && (
             <TabsContent value="admin-settings">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Platform Settings</CardTitle>
-                  <CardDescription>
-                    Configure platform-wide settings and preferences
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  <div className="space-y-2">
-                    <Label htmlFor="currency-select">Display Currency</Label>
-                    <p className="text-sm text-muted-foreground mb-2">
-                      Choose the currency for displaying revenue metrics
-                    </p>
-                    <Select
-                      value={displayCurrency}
-                      onValueChange={(value) => updateSettingsMutation.mutate({ displayCurrency: value })}
-                    >
-                      <SelectTrigger id="currency-select" className="w-48" data-testid="select-currency">
-                        <SelectValue placeholder="Select currency" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="EUR">EUR (€)</SelectItem>
-                        <SelectItem value="USD">USD ($)</SelectItem>
-                        <SelectItem value="GBP">GBP (£)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    {updateSettingsMutation.isPending && (
-                      <p className="text-sm text-muted-foreground flex items-center gap-2">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                        Saving...
+              <div className="space-y-6">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Platform Settings</CardTitle>
+                    <CardDescription>
+                      Configure platform-wide settings and preferences
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <div className="space-y-2">
+                      <Label htmlFor="currency-select">Display Currency</Label>
+                      <p className="text-sm text-muted-foreground mb-2">
+                        Choose the currency for displaying revenue metrics
                       </p>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
+                      <Select
+                        value={displayCurrency}
+                        onValueChange={(value) => updateSettingsMutation.mutate({ displayCurrency: value })}
+                      >
+                        <SelectTrigger id="currency-select" className="w-48" data-testid="select-currency">
+                          <SelectValue placeholder="Select currency" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="EUR">EUR (€)</SelectItem>
+                          <SelectItem value="USD">USD ($)</SelectItem>
+                          <SelectItem value="GBP">GBP (£)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      {updateSettingsMutation.isPending && (
+                        <p className="text-sm text-muted-foreground flex items-center gap-2">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Saving...
+                        </p>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <InvoiceSettings 
+                  settings={adminSettings} 
+                  onSave={(data) => updateSettingsMutation.mutate(data)}
+                  isSaving={updateSettingsMutation.isPending}
+                />
+              </div>
             </TabsContent>
           )}
         </Tabs>

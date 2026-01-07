@@ -1,6 +1,22 @@
+# Dependencies & Build Artifacts
 node_modules
 dist
 .DS_Store
+*.tar.gz
+
+# Generated Static Files
 server/public
 vite.config.ts.*
-*.tar.gz
+
+# 🛑 SECURITY: Never commit secrets
+.env
+
+# 🧹 CLEANUP: Ignore temp build folders & legacy assets
+temp_oss_build/
+temp_private_build/
+attached_assets/
+
+# Replit Specifics (Optional: keeps repo clean of platform files)
+.replit
+replit.nix
+replit.md

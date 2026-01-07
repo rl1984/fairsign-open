@@ -27,6 +27,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Loader2,
   Plus,
@@ -40,6 +41,9 @@ import {
   XCircle,
   RotateCcw,
   Archive,
+  Ban,
+  UserCheck,
+  Crown,
 } from "lucide-react";
 
 interface User {
@@ -54,6 +58,9 @@ interface User {
   deletedAt: string | null;
   scheduledDeletionDate: string | null;
   deletionReason: string | null;
+  accountType: string;
+  subscriptionStatus: string | null;
+  isBlocked: boolean;
 }
 
 export default function UserManagement() {
@@ -61,9 +68,12 @@ export default function UserManagement() {
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isResetPasswordDialogOpen, setIsResetPasswordDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isBlockDialogOpen, setIsBlockDialogOpen] = useState(false);
+  const [isAlterSubscriptionDialogOpen, setIsAlterSubscriptionDialogOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [activeTab, setActiveTab] = useState("active");
+  const [selectedAccountType, setSelectedAccountType] = useState<string>("free");
 
   const [newEmail, setNewEmail] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -172,6 +182,44 @@ export default function UserManagement() {
     },
   });
 
+  const toggleBlockMutation = useMutation({
+    mutationFn: async ({ userId, reason }: { userId: string; reason?: string }) => {
+      const res = await apiRequest("POST", `/api/ee/admin/users/${userId}/toggle-block`, { reason });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      toast({ 
+        title: data.isBlocked ? "User blocked" : "User unblocked", 
+        description: data.isBlocked ? "The user can no longer sign in." : "The user can now sign in again." 
+      });
+      setIsBlockDialogOpen(false);
+      setSelectedUser(null);
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const alterSubscriptionMutation = useMutation({
+    mutationFn: async ({ userId, accountType }: { userId: string; accountType: string }) => {
+      const res = await apiRequest("POST", `/api/ee/admin/users/${userId}/alter-subscription`, { accountType });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      toast({ 
+        title: "Subscription updated", 
+        description: `User subscription changed to ${data.accountType}.` 
+      });
+      setIsAlterSubscriptionDialogOpen(false);
+      setSelectedUser(null);
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
   const resetCreateDialog = () => {
     setNewEmail("");
     setNewPassword("");
@@ -250,6 +298,49 @@ export default function UserManagement() {
                   Unverified
                 </Badge>
               )}
+              {!isArchived && u.isBlocked && (
+                <Badge variant="destructive" className="text-xs">
+                  <Ban className="h-3 w-3 mr-1" />
+                  Blocked
+                </Badge>
+              )}
+              {!isArchived && (
+                <Badge 
+                  variant="outline" 
+                  className={`text-xs ${
+                    u.accountType === "enterprise" 
+                      ? "bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800"
+                      : u.accountType === "pro"
+                      ? "bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800"
+                      : u.accountType === "org"
+                      ? "bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800"
+                      : "bg-gray-50 dark:bg-gray-900 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700"
+                  }`}
+                  data-testid={`badge-tier-${u.id}`}
+                >
+                  <Crown className="h-3 w-3 mr-1" />
+                  {u.accountType ? u.accountType.charAt(0).toUpperCase() + u.accountType.slice(1) : "Free"}
+                </Badge>
+              )}
+              {!isArchived && u.subscriptionStatus && (
+                <Badge 
+                  variant="outline" 
+                  className={`text-xs ${
+                    u.subscriptionStatus === "active"
+                      ? "bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800"
+                      : u.subscriptionStatus === "trialing"
+                      ? "bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800"
+                      : u.subscriptionStatus === "past_due"
+                      ? "bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800"
+                      : u.subscriptionStatus === "canceled" || u.subscriptionStatus === "unpaid"
+                      ? "bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800"
+                      : ""
+                  }`}
+                  data-testid={`badge-status-${u.id}`}
+                >
+                  {u.subscriptionStatus.charAt(0).toUpperCase() + u.subscriptionStatus.slice(1).replace("_", " ")}
+                </Badge>
+              )}
             </div>
             <p className="text-sm text-muted-foreground">
               {u.firstName} {u.lastName} {u.firstName || u.lastName ? "-" : ""} Joined {formatDate(u.createdAt)}
@@ -308,6 +399,44 @@ export default function UserManagement() {
                   >
                     <ShieldOff className="h-4 w-4 mr-1" />
                     Disable 2FA
+                  </Button>
+                )}
+                {!u.isAdmin && (
+                  <Button
+                    variant={u.isBlocked ? "outline" : "destructive"}
+                    size="sm"
+                    onClick={() => {
+                      setSelectedUser(u);
+                      setIsBlockDialogOpen(true);
+                    }}
+                    data-testid={`button-toggle-block-${u.id}`}
+                  >
+                    {u.isBlocked ? (
+                      <>
+                        <UserCheck className="h-4 w-4 mr-1" />
+                        Allow Sign In
+                      </>
+                    ) : (
+                      <>
+                        <Ban className="h-4 w-4 mr-1" />
+                        Block Sign In
+                      </>
+                    )}
+                  </Button>
+                )}
+                {!u.isAdmin && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedUser(u);
+                      setSelectedAccountType(u.accountType || "free");
+                      setIsAlterSubscriptionDialogOpen(true);
+                    }}
+                    data-testid={`button-alter-subscription-${u.id}`}
+                  >
+                    <Crown className="h-4 w-4 mr-1" />
+                    Alter Subscription
                   </Button>
                 )}
                 <Button
@@ -587,6 +716,113 @@ export default function UserManagement() {
             >
               {deleteUserMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Delete Account
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={isBlockDialogOpen} onOpenChange={(open) => {
+        if (!open) {
+          setIsBlockDialogOpen(false);
+          setSelectedUser(null);
+        }
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              {selectedUser?.isBlocked ? (
+                <>
+                  <UserCheck className="h-5 w-5" />
+                  Allow User Sign In
+                </>
+              ) : (
+                <>
+                  <Ban className="h-5 w-5 text-destructive" />
+                  Block User Sign In
+                </>
+              )}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {selectedUser?.isBlocked ? (
+                <>
+                  This will allow <span className="font-semibold">{selectedUser?.email}</span> to sign in again. 
+                  They will have full access to their account.
+                </>
+              ) : (
+                <>
+                  This will prevent <span className="font-semibold">{selectedUser?.email}</span> from signing in. 
+                  They will see a "suspended" message when attempting to log in.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => selectedUser && toggleBlockMutation.mutate({ userId: selectedUser.id })}
+              className={selectedUser?.isBlocked ? "" : "bg-destructive text-destructive-foreground hover:bg-destructive/90"}
+              data-testid="button-confirm-toggle-block"
+            >
+              {toggleBlockMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              {selectedUser?.isBlocked ? "Allow Sign In" : "Block Sign In"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog open={isAlterSubscriptionDialogOpen} onOpenChange={(open) => {
+        if (!open) {
+          setIsAlterSubscriptionDialogOpen(false);
+          setSelectedUser(null);
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Crown className="h-5 w-5" />
+              Alter Subscription
+            </DialogTitle>
+            <DialogDescription>
+              Change the subscription tier for <span className="font-semibold">{selectedUser?.email}</span>. 
+              This will override any payment system settings.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4 space-y-4">
+            <div className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-md p-4">
+              <p className="text-sm text-amber-800 dark:text-amber-200">
+                Warning: This manually overrides the subscription tier and bypasses the payment system. 
+                Use with caution.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label>Current tier: <span className="font-semibold capitalize">{selectedUser?.accountType || "free"}</span></Label>
+              <Select value={selectedAccountType} onValueChange={setSelectedAccountType}>
+                <SelectTrigger data-testid="select-account-type">
+                  <SelectValue placeholder="Select subscription tier" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="free">Free</SelectItem>
+                  <SelectItem value="pro">Pro</SelectItem>
+                  <SelectItem value="enterprise">Enterprise</SelectItem>
+                  <SelectItem value="org">Org</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => {
+              setIsAlterSubscriptionDialogOpen(false);
+              setSelectedUser(null);
+            }}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => selectedUser && alterSubscriptionMutation.mutate({ userId: selectedUser.id, accountType: selectedAccountType })}
+              disabled={alterSubscriptionMutation.isPending || selectedAccountType === selectedUser?.accountType}
+              data-testid="button-confirm-alter-subscription"
+            >
+              {alterSubscriptionMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Update Subscription
             </Button>
           </DialogFooter>
         </DialogContent>

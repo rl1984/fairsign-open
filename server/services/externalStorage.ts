@@ -77,6 +77,7 @@ export interface StorageProviderInfo {
   connected: boolean;
   email?: string | null;
   requiresEncryption?: boolean;
+  requiresPro?: boolean;
 }
 
 export function getOAuthConfig(provider: StorageProvider): OAuthConfig | null {
@@ -101,8 +102,9 @@ export function getOAuthConfig(provider: StorageProvider): OAuthConfig | null {
       };
 
     case "dropbox":
-      const dropboxClientId = process.env.DROPBOX_CLIENT_ID;
-      const dropboxClientSecret = process.env.DROPBOX_CLIENT_SECRET;
+      // Dropbox uses APP_KEY and APP_SECRET naming convention
+      const dropboxClientId = process.env.DROPBOX_APP_KEY;
+      const dropboxClientSecret = process.env.DROPBOX_APP_SECRET;
       if (!dropboxClientId || !dropboxClientSecret) return null;
       return {
         clientId: dropboxClientId,
@@ -110,6 +112,7 @@ export function getOAuthConfig(provider: StorageProvider): OAuthConfig | null {
         redirectUri: `${baseUrl}/api/storage/oauth/callback/dropbox`,
         authUrl: "https://www.dropbox.com/oauth2/authorize",
         tokenUrl: "https://api.dropboxapi.com/oauth2/token",
+        // Dropbox scopes for file access
         scope: "files.content.write files.content.read account_info.read",
       };
 
@@ -135,15 +138,34 @@ export function generateOAuthUrl(provider: StorageProvider, state: string): stri
   const config = getOAuthConfig(provider);
   if (!config) return null;
 
+  // Base params for all providers
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: config.redirectUri,
     response_type: "code",
-    scope: config.scope,
     state,
-    access_type: "offline",
-    prompt: "consent",
   });
+
+  // Provider-specific parameters
+  switch (provider) {
+    case "dropbox":
+      // Dropbox uses token_access_type for refresh tokens, not access_type
+      params.set("token_access_type", "offline");
+      // Dropbox scoped apps require explicit scope parameter
+      params.set("scope", config.scope);
+      break;
+    case "google_drive":
+      params.set("scope", config.scope);
+      params.set("access_type", "offline");
+      params.set("prompt", "consent");
+      break;
+    case "box":
+      params.set("scope", config.scope);
+      break;
+    default:
+      params.set("scope", config.scope);
+      break;
+  }
 
   return `${config.authUrl}?${params.toString()}`;
 }
@@ -277,11 +299,14 @@ export function isProviderConfigured(provider: StorageProvider): boolean {
     case "google_drive":
       return !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
     case "dropbox":
-      return !!(process.env.DROPBOX_CLIENT_ID && process.env.DROPBOX_CLIENT_SECRET);
+      // Dropbox uses APP_KEY and APP_SECRET naming convention
+      return !!(process.env.DROPBOX_APP_KEY && process.env.DROPBOX_APP_SECRET);
     case "box":
       return !!(process.env.BOX_CLIENT_ID && process.env.BOX_CLIENT_SECRET);
     case "fairsign":
       return true;
+    case "custom_s3":
+      return true; // Always configured - user provides their own credentials
     default:
       return false;
   }
@@ -292,27 +317,37 @@ export function getAvailableProviders(): StorageProviderInfo[] {
     {
       provider: "fairsign",
       name: "FairSign Storage",
-      description: "Secure encrypted storage powered by Amazon S3. Your documents are encrypted before upload and only you can access them.",
+      description: "Secure encrypted storage powered by Cloudflare R2. Your documents are encrypted before upload and only you can access them.",
       connected: true,
       requiresEncryption: true,
+    },
+    {
+      provider: "custom_s3",
+      name: "Custom S3 Storage",
+      description: "Connect your own S3-compatible storage (AWS S3, Cloudflare R2, MinIO, etc.).",
+      connected: false,
+      requiresPro: true,
     },
     {
       provider: "google_drive",
       name: "Google Drive",
       description: "Store signed documents in your Google Drive account.",
       connected: false,
+      requiresPro: true,
     },
     {
       provider: "dropbox",
       name: "Dropbox",
       description: "Store signed documents in your Dropbox account.",
       connected: false,
+      requiresPro: true,
     },
     {
       provider: "box",
       name: "Box",
       description: "Store signed documents in your Box account.",
       connected: false,
+      requiresPro: true,
     },
   ];
 }

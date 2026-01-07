@@ -19,6 +19,7 @@ export const templates = pgTable("templates", {
   pageCount: integer("page_count"), // For PDF templates
   pageDimensions: jsonb("page_dimensions").$type<{ width: number; height: number }[]>(), // Per-page dimensions
   placeholders: jsonb("placeholders").$type<string[]>(), // List of placeholder keys (derived from fields for PDF)
+  signerRoles: jsonb("signer_roles").$type<string[]>().default(["Signer 1"]), // Custom signer role names (up to 10)
   isDefault: boolean("is_default").default(false), // System-provided templates
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -43,6 +44,7 @@ export const templateFields = pgTable("template_fields", {
   inputMode: text("input_mode").default("any"), // For text fields: any | text | numeric
   placeholder: text("placeholder"), // Placeholder text for text/date fields
   creatorFills: boolean("creator_fills").default(false), // If true, creator fills this field at document creation time
+  isDocumentDate: boolean("is_document_date").default(false), // For date fields: if true, auto-fill with signing date
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -51,6 +53,9 @@ export const documents = pgTable("documents", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id"), // Owner of the document (landlord/property manager)
   templateId: text("template_id"), // Nullable for one-off documents without a template
+  title: text("title"), // Display title for the document
+  isTemplate: boolean("is_template").default(false), // True if this is a template document
+  mimeType: text("mime_type"), // MIME type of the document (e.g., "application/pdf")
   status: text("status").notNull().default("created"), // created | sent | completed
   dataJson: jsonb("data_json").notNull(),
   callbackUrl: text("callback_url"),
@@ -58,7 +63,11 @@ export const documents = pgTable("documents", {
   unsignedPdfKey: text("unsigned_pdf_key"),
   signedPdfKey: text("signed_pdf_key"),
   signedPdfSha256: text("signed_pdf_sha256"),
+  originalHash: text("original_hash"), // SHA-256 hash of original blank PDF before any modifications
   archivedAt: timestamp("archived_at"), // When document was archived (null = not archived)
+  // Data residency - tracks which bucket/region the document files are stored in
+  storageBucket: text("storage_bucket"), // The S3 bucket name where files are stored (null = default EU bucket)
+  storageRegion: text("storage_region"), // The region code (EU | US) for this document's files
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -108,6 +117,16 @@ export const auditEvents = pgTable("audit_events", {
   ip: text("ip"),
   userAgent: text("user_agent"),
   metaJson: jsonb("meta_json"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// API call logs - tracks API calls for analytics and quota tracking
+export const apiCallLogs = pgTable("api_call_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  endpoint: text("endpoint").notNull(),
+  method: text("method").notNull(),
+  statusCode: integer("status_code"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -253,8 +272,9 @@ export const insertEmailLogSchema = createInsertSchema(emailLogs).omit({
 });
 
 export const insertDocumentSignerSchema = createInsertSchema(documentSigners).omit({
-  id: true,
   createdAt: true,
+}).extend({
+  id: z.string().uuid().optional(), // Allow optional UUID ID for pre-generated signer IDs in bulk send
 });
 
 // Types
@@ -330,6 +350,12 @@ export type InsertPromoCampaign = z.infer<typeof insertPromoCampaignSchema>;
 export const adminSettings = pgTable("admin_settings", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   displayCurrency: varchar("display_currency").default("EUR").notNull(), // EUR | USD | GBP
+  companyName: text("company_name"), // Company name for invoices
+  companyAddress: text("company_address"), // Full address for invoices
+  companyVatId: text("company_vat_id"), // VAT/Tax ID
+  companyEmail: text("company_email"), // Contact email for invoices
+  companyPhone: text("company_phone"), // Contact phone
+  companyLogoKey: text("company_logo_key"), // Storage key for company logo
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   updatedBy: varchar("updated_by"), // Admin user ID who last updated
 });
@@ -340,6 +366,60 @@ export const insertAdminSettingsSchema = createInsertSchema(adminSettings).omit(
 });
 export type AdminSettings = typeof adminSettings.$inferSelect;
 export type InsertAdminSettings = z.infer<typeof insertAdminSettingsSchema>;
+
+// Bulk send batches - tracks bulk sending jobs
+export const bulkBatches = pgTable("bulk_batches", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  originalFilename: text("original_filename").notNull(),
+  title: text("title").notNull(),
+  pdfStorageKey: text("pdf_storage_key").notNull(),
+  fieldsJson: jsonb("fields_json"), // Field definitions for signature spots
+  status: text("status").notNull().default("draft"), // draft | processing | completed | partial | failed
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Bulk send items - individual recipients in a batch
+export const bulkItems = pgTable("bulk_items", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  batchId: varchar("batch_id").notNull().references(() => bulkBatches.id, { onDelete: "cascade" }),
+  recipientName: text("recipient_name").notNull(),
+  recipientEmail: text("recipient_email").notNull(),
+  status: text("status").notNull().default("pending"), // pending | sent | error
+  errorMessage: text("error_message"),
+  envelopeId: varchar("envelope_id").references(() => documents.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// Bulk send relations
+export const bulkBatchesRelations = relations(bulkBatches, ({ many }) => ({
+  items: many(bulkItems),
+}));
+
+export const bulkItemsRelations = relations(bulkItems, ({ one }) => ({
+  batch: one(bulkBatches, {
+    fields: [bulkItems.batchId],
+    references: [bulkBatches.id],
+  }),
+  document: one(documents, {
+    fields: [bulkItems.envelopeId],
+    references: [documents.id],
+  }),
+}));
+
+export const insertBulkBatchSchema = createInsertSchema(bulkBatches).omit({
+  id: true,
+  createdAt: true,
+});
+export type BulkBatch = typeof bulkBatches.$inferSelect;
+export type InsertBulkBatch = z.infer<typeof insertBulkBatchSchema>;
+
+export const insertBulkItemSchema = createInsertSchema(bulkItems).omit({
+  id: true,
+  createdAt: true,
+});
+export type BulkItem = typeof bulkItems.$inferSelect;
+export type InsertBulkItem = z.infer<typeof insertBulkItemSchema>;
 
 // API request/response schemas
 export const signerSchema = z.object({
@@ -370,6 +450,11 @@ export interface DocumentMetadata {
   signatureImages?: Record<string, string>;
   textValues?: Record<string, string>; // Map of spotKey -> text value for text/date/checkbox fields
   signerId?: string; // The ID of the current signer (for mobile signing sessions)
+  senderVerified?: boolean; // Whether the document sender has completed identity verification
+  // Embedded signing fields (Enterprise feature)
+  embeddedSigning?: boolean; // Whether this is an embedded signing document
+  embeddedRedirectUrl?: string | null; // Redirect URL after signing (for parent frame navigation)
+  allowedOrigins?: string[]; // Allowed origins for postMessage communication
   currentSigner?: {
     email: string;
     name: string;

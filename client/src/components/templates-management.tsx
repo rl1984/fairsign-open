@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { Loader2, Plus, FileCode, Edit, Trash2, Eye, Code, FileText, Upload, Settings, X, GripVertical, Type, PenTool, CheckSquare, Maximize, Calendar, Edit3, AlignLeft, Hash, Send, User, Mail } from "lucide-react";
+import { Loader2, Plus, FileCode, Edit, Trash2, Eye, Code, FileText, Upload, Settings, X, GripVertical, Type, PenTool, CheckSquare, Maximize, Calendar, Edit3, AlignLeft, Hash, Send, User, Mail, Copy } from "lucide-react";
 import type { Template, TemplateField } from "@shared/schema";
 import * as pdfjsLib from "pdfjs-dist";
 
@@ -40,6 +40,7 @@ interface PlacedField {
   inputMode?: InputMode;
   placeholder?: string;
   creatorFills?: boolean;
+  isDocumentDate?: boolean;
 }
 
 export function TemplatesManagement() {
@@ -659,6 +660,29 @@ function ViewTemplateDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
+          <div>
+            <Label className="text-sm font-medium">Template ID</Label>
+            <div className="flex items-center gap-2 mt-1">
+              <code className="px-2 py-1 bg-muted rounded text-sm font-mono" data-testid="text-template-id">
+                {template?.id}
+              </code>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  if (template?.id) {
+                    navigator.clipboard.writeText(template.id);
+                  }
+                }}
+                data-testid="button-copy-template-id"
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              Use this ID when calling the API to create documents from this template
+            </p>
+          </div>
           {placeholders.length > 0 && (
             <div>
               <Label className="text-sm font-medium">Placeholders</Label>
@@ -722,6 +746,7 @@ function PdfFieldEditorDialog({
   const [renderScale, setRenderScale] = useState(2); // Higher resolution multiplier
   const [containerWidth, setContainerWidth] = useState<number | null>(null);
   const [autoFitEnabled, setAutoFitEnabled] = useState(true);
+  const [signerRoles, setSignerRoles] = useState<string[]>(["Signer 1"]);
 
   const selectedField = fields.find((f) => f.id === selectedFieldId);
 
@@ -807,25 +832,39 @@ function PdfFieldEditorDialog({
       });
       if (!res.ok) throw new Error("Failed to load fields");
       const data: TemplateField[] = await res.json();
+      
+      // Get template's signer roles for reconciliation
+      const templateRoles = (template as any).signerRoles;
+      const validRoles = Array.isArray(templateRoles) && templateRoles.length > 0 
+        ? templateRoles 
+        : ["Signer 1"];
+      const defaultRole = validRoles[0];
+      
       setFields(
-        data.map((f) => ({
-          id: f.id,
-          apiTag: f.apiTag,
-          fieldType: f.fieldType as FieldType,
-          label: f.label || "",
-          page: f.page,
-          x: Number(f.x),
-          y: Number(f.y),
-          width: Number(f.width),
-          height: Number(f.height),
-          signerRole: f.signerRole || "tenant",
-          required: f.required ?? true,
-          fontSize: f.fontSize || 12,
-          fontColor: f.fontColor || "#000000",
-          inputMode: (f as any).inputMode as InputMode || "any",
-          placeholder: (f as any).placeholder || "",
-          creatorFills: (f as any).creatorFills || false,
-        }))
+        data.map((f) => {
+          const role = f.signerRole || defaultRole;
+          // If the field's role is not in the valid roles, default to the first role
+          const reconciledRole = validRoles.includes(role) ? role : defaultRole;
+          return {
+            id: f.id,
+            apiTag: f.apiTag,
+            fieldType: f.fieldType as FieldType,
+            label: f.label || "",
+            page: f.page,
+            x: Number(f.x),
+            y: Number(f.y),
+            width: Number(f.width),
+            height: Number(f.height),
+            signerRole: reconciledRole,
+            required: f.required ?? true,
+            fontSize: f.fontSize || 12,
+            fontColor: f.fontColor || "#000000",
+            inputMode: (f as any).inputMode as InputMode || "any",
+            placeholder: (f as any).placeholder || "",
+            creatorFills: (f as any).creatorFills || false,
+            isDocumentDate: (f as any).isDocumentDate || false,
+          };
+        })
       );
     } catch (error) {
       console.error("Error loading fields:", error);
@@ -839,12 +878,16 @@ function PdfFieldEditorDialog({
       setAutoFitEnabled(true);
       setContainerWidth(null);
       setPageDimensions(null);
+      // Load signer roles from template or use default
+      const templateRoles = (template as any).signerRoles;
+      setSignerRoles(Array.isArray(templateRoles) && templateRoles.length > 0 ? templateRoles : ["Signer 1"]);
       loadPdf();
       loadFields();
     } else {
       setPdfDoc(null);
       setFields([]);
       setSelectedFieldId(null);
+      setSignerRoles(["Signer 1"]);
     }
   }, [template, loadPdf, loadFields]);
 
@@ -964,13 +1007,14 @@ function PdfFieldEditorDialog({
           y: y - size.height / 2,
           width: size.width,
           height: size.height,
-          signerRole: "tenant",
+          signerRole: signerRoles[0] || "Signer 1",
           required: true,
           fontSize: 12,
           fontColor: "#000000",
           inputMode: "any",
           placeholder: "",
           creatorFills: false,
+          isDocumentDate: false,
         };
 
         setFields([...fields, newField]);
@@ -1177,7 +1221,9 @@ function PdfFieldEditorDialog({
           inputMode: f.inputMode,
           placeholder: f.placeholder,
           creatorFills: f.creatorFills,
+          isDocumentDate: f.isDocumentDate,
         })),
+        signerRoles: signerRoles,
       });
 
       if (!res.ok) throw new Error("Failed to save fields");
@@ -1228,17 +1274,34 @@ function PdfFieldEditorDialog({
     <Dialog open={!!template} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-6xl h-[90vh] p-0 overflow-hidden">
         <div className="flex flex-col h-full">
-          <DialogHeader className="p-4 border-b">
-            <DialogTitle className="flex items-center gap-2">
-              <Settings className="h-5 w-5" />
-              Configure Fields - {template?.name}
-            </DialogTitle>
+          <DialogHeader className="p-4 border-b pr-12">
+            <div className="flex items-center justify-between gap-4">
+              <DialogTitle className="flex items-center gap-2">
+                <Settings className="h-5 w-5" />
+                Configure Fields - {template?.name}
+              </DialogTitle>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={() => onOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={saveFields} disabled={isSaving} data-testid="button-save-fields">
+                  {isSaving ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    "Save Fields"
+                  )}
+                </Button>
+              </div>
+            </div>
             <DialogDescription>
               Click on the PDF to place form fields. Drag to move, use corner handles to resize.
             </DialogDescription>
           </DialogHeader>
 
-          <ResizablePanelGroup direction="horizontal" className="flex-1">
+          <ResizablePanelGroup direction="horizontal" className="flex-1 min-h-0">
             <ResizablePanel defaultSize={70} minSize={40} className="min-w-0">
               <div 
                 ref={containerRef}
@@ -1284,6 +1347,11 @@ function PdfFieldEditorDialog({
                           {field.creatorFills && (
                             <Badge variant="secondary" className="text-[10px] px-1 py-0">
                               Creator
+                            </Badge>
+                          )}
+                          {field.isDocumentDate && (
+                            <Badge variant="outline" className="text-[10px] px-1 py-0">
+                              Doc Date
                             </Badge>
                           )}
                         </div>
@@ -1353,8 +1421,9 @@ function PdfFieldEditorDialog({
             <ResizableHandle withHandle data-testid="handle-field-editor-split" />
 
             <ResizablePanel defaultSize={30} minSize={20} maxSize={50}>
-              <div className="h-full overflow-y-auto bg-background">
-              <div className="p-4 space-y-4">
+              <div className="relative h-full">
+                <div className="absolute inset-0 overflow-y-auto bg-background">
+              <div className="p-4 space-y-4 pb-8">
                 <div className="space-y-2">
                   <Label>Field Tool</Label>
                   <div className="flex gap-1 flex-wrap">
@@ -1497,6 +1566,82 @@ function PdfFieldEditorDialog({
                   <p className="text-xs text-muted-foreground">Higher = sharper but slower</p>
                 </div>
 
+                <div className="space-y-2 border-t pt-4">
+                  <div className="flex items-center justify-between">
+                    <Label>Signer Roles</Label>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (signerRoles.length >= 10) {
+                          toast({ title: "Maximum reached", description: "You can add up to 10 signer roles", variant: "destructive" });
+                          return;
+                        }
+                        const newRoleName = `Signer ${signerRoles.length + 1}`;
+                        setSignerRoles([...signerRoles, newRoleName]);
+                      }}
+                      disabled={signerRoles.length >= 10}
+                      data-testid="button-add-signer-role"
+                    >
+                      <Plus className="h-3 w-3 mr-1" />
+                      Add
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Define who needs to sign this document (up to 10)
+                  </p>
+                  <div className="space-y-2">
+                    {signerRoles.map((role, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <Input
+                          value={role}
+                          onChange={(e) => {
+                            const oldRoleName = signerRoles[index];
+                            const newRoleName = e.target.value;
+                            const newRoles = [...signerRoles];
+                            newRoles[index] = newRoleName;
+                            setSignerRoles(newRoles);
+                            // Update fields that used the old role name to use the new one
+                            if (oldRoleName !== newRoleName) {
+                              setFields((prev) =>
+                                prev.map((f) =>
+                                  f.signerRole === oldRoleName
+                                    ? { ...f, signerRole: newRoleName }
+                                    : f
+                                )
+                              );
+                            }
+                          }}
+                          placeholder="Role name"
+                          data-testid={`input-signer-role-${index}`}
+                        />
+                        {signerRoles.length > 1 && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              const removedRole = signerRoles[index];
+                              const newRoles = signerRoles.filter((_, i) => i !== index);
+                              setSignerRoles(newRoles);
+                              // Update fields that used the removed role to use the first role
+                              setFields((prev) =>
+                                prev.map((f) =>
+                                  f.signerRole === removedRole
+                                    ? { ...f, signerRole: newRoles[0] }
+                                    : f
+                                )
+                              );
+                            }}
+                            data-testid={`button-remove-signer-role-${index}`}
+                          >
+                            <X className="h-4 w-4 text-destructive" />
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 {selectedField && (
                   <div className="space-y-4 border-t pt-4">
                     <div className="flex items-center justify-between">
@@ -1546,10 +1691,9 @@ function PdfFieldEditorDialog({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="landlord">Landlord</SelectItem>
-                          <SelectItem value="tenant">Tenant</SelectItem>
-                          <SelectItem value="witness">Witness</SelectItem>
-                          <SelectItem value="guarantor">Guarantor</SelectItem>
+                          {signerRoles.map((role) => (
+                            <SelectItem key={role} value={role}>{role}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
@@ -1635,13 +1779,34 @@ function PdfFieldEditorDialog({
                           <Checkbox
                             id="creatorFills"
                             checked={selectedField.creatorFills || false}
-                            onCheckedChange={(checked) => updateSelectedField({ creatorFills: !!checked })}
+                            onCheckedChange={(checked) => updateSelectedField({ 
+                              creatorFills: !!checked,
+                              isDocumentDate: checked ? false : selectedField.isDocumentDate
+                            })}
+                            disabled={selectedField.isDocumentDate}
                             data-testid="checkbox-creator-fills"
                           />
                           <Label htmlFor="creatorFills" className="text-sm font-normal cursor-pointer">
                             Creator fills at document creation
                           </Label>
                         </div>
+
+                        {selectedField.fieldType === "date" && (
+                          <div className="flex items-center gap-2 pt-2">
+                            <Checkbox
+                              id="isDocumentDate"
+                              checked={selectedField.isDocumentDate || false}
+                              onCheckedChange={(checked) => updateSelectedField({ 
+                                isDocumentDate: !!checked,
+                                creatorFills: checked ? false : selectedField.creatorFills
+                              })}
+                              data-testid="checkbox-document-date"
+                            />
+                            <Label htmlFor="isDocumentDate" className="text-sm font-normal cursor-pointer">
+                              Auto-fill with signing date
+                            </Label>
+                          </div>
+                        )}
                       </>
                     )}
 
@@ -1722,24 +1887,9 @@ function PdfFieldEditorDialog({
                 </div>
               </div>
               </div>
+              </div>
             </ResizablePanel>
           </ResizablePanelGroup>
-
-          <div className="p-4 border-t flex justify-end gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button onClick={saveFields} disabled={isSaving} data-testid="button-save-fields">
-              {isSaving ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Saving...
-                </>
-              ) : (
-                "Save Fields"
-              )}
-            </Button>
-          </div>
         </div>
       </DialogContent>
     </Dialog>
@@ -1845,10 +1995,21 @@ function CreateDocumentFromTemplateDialog({
 
     setIsSending(true);
     try {
+      // Convert date values from YYYY-MM-DD (browser format) to DD-MM-YYYY
+      const convertedCreatorFieldValues: Record<string, string> = {};
+      for (const [key, value] of Object.entries(creatorFieldValues)) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+          const [year, month, day] = value.split('-');
+          convertedCreatorFieldValues[key] = `${day}-${month}-${year}`;
+        } else {
+          convertedCreatorFieldValues[key] = value;
+        }
+      }
+
       const res = await apiRequest("POST", "/api/admin/documents/from-template", {
         templateId: template.id,
         signers: signers.map((s, index) => ({ ...s, orderIndex: index })),
-        creatorFieldValues,
+        creatorFieldValues: convertedCreatorFieldValues,
         sendEmail,
       });
 

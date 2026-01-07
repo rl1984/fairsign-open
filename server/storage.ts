@@ -10,6 +10,8 @@ import {
   textFieldValues,
   signerSessions,
   promoCampaigns,
+  bulkBatches,
+  bulkItems,
   type Document,
   type InsertDocument,
   type SignatureAsset,
@@ -30,9 +32,18 @@ import {
   type InsertSignerSession,
   type PromoCampaign,
   type InsertPromoCampaign,
+  type BulkBatch,
+  type InsertBulkBatch,
+  type BulkItem,
+  type InsertBulkItem,
 } from "@shared/schema";
+import {
+  userGuides,
+  type UserGuide,
+  type InsertUserGuide,
+} from "@shared/models/auth";
 import { db } from "./db";
-import { eq, and, desc, or, isNull } from "drizzle-orm";
+import { eq, and, desc, or, isNull, sql } from "drizzle-orm";
 
 export interface IStorage {
   // Templates
@@ -47,6 +58,7 @@ export interface IStorage {
   createDocument(doc: InsertDocument & { userId?: string }): Promise<Document>;
   getDocument(id: string): Promise<Document | undefined>;
   getDocumentByToken(token: string): Promise<Document | undefined>;
+  getDocumentByDataJsonToken(token: string): Promise<Document | undefined>;
   getDocumentsByUser(userId: string): Promise<Document[]>;
   updateDocument(id: string, updates: Partial<Document>): Promise<Document | undefined>;
 
@@ -105,6 +117,26 @@ export interface IStorage {
   updatePromoCampaign(id: string, updates: Partial<PromoCampaign>): Promise<PromoCampaign | undefined>;
   deletePromoCampaign(id: string): Promise<boolean>;
   incrementPromoRedemption(id: string): Promise<void>;
+
+  // Bulk Send
+  createBulkBatch(batch: InsertBulkBatch): Promise<BulkBatch>;
+  getBulkBatch(id: string): Promise<BulkBatch | undefined>;
+  getBulkBatchesByUser(userId: string): Promise<BulkBatch[]>;
+  updateBulkBatch(id: string, updates: Partial<BulkBatch>): Promise<BulkBatch | undefined>;
+  createBulkItem(item: InsertBulkItem): Promise<BulkItem>;
+  createBulkItems(items: InsertBulkItem[]): Promise<BulkItem[]>;
+  getBulkItems(batchId: string): Promise<BulkItem[]>;
+  getBulkItemsByStatus(batchId: string, status: string): Promise<BulkItem[]>;
+  updateBulkItem(id: string, updates: Partial<BulkItem>): Promise<BulkItem | undefined>;
+
+  // User Guides
+  createUserGuide(guide: InsertUserGuide): Promise<UserGuide>;
+  getUserGuide(id: string): Promise<UserGuide | undefined>;
+  getUserGuideBySlug(slug: string): Promise<UserGuide | undefined>;
+  getAllUserGuides(): Promise<UserGuide[]>;
+  getPublishedUserGuides(): Promise<UserGuide[]>;
+  updateUserGuide(id: string, updates: Partial<UserGuide>): Promise<UserGuide | undefined>;
+  deleteUserGuide(id: string): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -162,6 +194,14 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(documents)
       .where(eq(documents.signingToken, token));
+    return document || undefined;
+  }
+
+  async getDocumentByDataJsonToken(token: string): Promise<Document | undefined> {
+    const [document] = await db
+      .select()
+      .from(documents)
+      .where(sql`${documents.dataJson}->>'token' = ${token}`);
     return document || undefined;
   }
 
@@ -480,6 +520,106 @@ export class DatabaseStorage implements IStorage {
         .set({ currentRedemptions: campaign.currentRedemptions + 1 })
         .where(eq(promoCampaigns.id, id));
     }
+  }
+
+  // Bulk Send
+  async createBulkBatch(batch: InsertBulkBatch): Promise<BulkBatch> {
+    const [result] = await db.insert(bulkBatches).values(batch).returning();
+    return result;
+  }
+
+  async getBulkBatch(id: string): Promise<BulkBatch | undefined> {
+    const [batch] = await db.select().from(bulkBatches).where(eq(bulkBatches.id, id));
+    return batch || undefined;
+  }
+
+  async getBulkBatchesByUser(userId: string): Promise<BulkBatch[]> {
+    return db
+      .select()
+      .from(bulkBatches)
+      .where(eq(bulkBatches.userId, userId))
+      .orderBy(desc(bulkBatches.createdAt));
+  }
+
+  async updateBulkBatch(id: string, updates: Partial<BulkBatch>): Promise<BulkBatch | undefined> {
+    const [batch] = await db
+      .update(bulkBatches)
+      .set(updates)
+      .where(eq(bulkBatches.id, id))
+      .returning();
+    return batch || undefined;
+  }
+
+  async createBulkItem(item: InsertBulkItem): Promise<BulkItem> {
+    const [result] = await db.insert(bulkItems).values(item).returning();
+    return result;
+  }
+
+  async createBulkItems(items: InsertBulkItem[]): Promise<BulkItem[]> {
+    if (items.length === 0) return [];
+    return db.insert(bulkItems).values(items).returning();
+  }
+
+  async getBulkItems(batchId: string): Promise<BulkItem[]> {
+    return db
+      .select()
+      .from(bulkItems)
+      .where(eq(bulkItems.batchId, batchId))
+      .orderBy(bulkItems.createdAt);
+  }
+
+  async getBulkItemsByStatus(batchId: string, status: string): Promise<BulkItem[]> {
+    return db
+      .select()
+      .from(bulkItems)
+      .where(and(eq(bulkItems.batchId, batchId), eq(bulkItems.status, status)));
+  }
+
+  async updateBulkItem(id: string, updates: Partial<BulkItem>): Promise<BulkItem | undefined> {
+    const [item] = await db
+      .update(bulkItems)
+      .set(updates)
+      .where(eq(bulkItems.id, id))
+      .returning();
+    return item || undefined;
+  }
+
+  // User Guides
+  async createUserGuide(guide: InsertUserGuide): Promise<UserGuide> {
+    const [result] = await db.insert(userGuides).values(guide).returning();
+    return result;
+  }
+
+  async getUserGuide(id: string): Promise<UserGuide | undefined> {
+    const [guide] = await db.select().from(userGuides).where(eq(userGuides.id, id));
+    return guide || undefined;
+  }
+
+  async getUserGuideBySlug(slug: string): Promise<UserGuide | undefined> {
+    const [guide] = await db.select().from(userGuides).where(eq(userGuides.slug, slug));
+    return guide || undefined;
+  }
+
+  async getAllUserGuides(): Promise<UserGuide[]> {
+    return db.select().from(userGuides).orderBy(userGuides.sortOrder);
+  }
+
+  async getPublishedUserGuides(): Promise<UserGuide[]> {
+    return db.select().from(userGuides).where(eq(userGuides.published, true)).orderBy(userGuides.sortOrder);
+  }
+
+  async updateUserGuide(id: string, updates: Partial<UserGuide>): Promise<UserGuide | undefined> {
+    const [guide] = await db
+      .update(userGuides)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(userGuides.id, id))
+      .returning();
+    return guide || undefined;
+  }
+
+  async deleteUserGuide(id: string): Promise<boolean> {
+    await db.delete(userGuides).where(eq(userGuides.id, id));
+    return true;
   }
 }
 

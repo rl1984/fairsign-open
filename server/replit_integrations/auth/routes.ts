@@ -26,6 +26,7 @@ export function registerAuthRoutes(app: Express): void {
         profileImageKey: user.profileImageKey,
         isAdmin: user.isAdmin,
         twoFactorEnabled: user.twoFactorEnabled,
+        accountType: user.accountType || "free",
       });
     } catch (error) {
       console.error("Error fetching user:", error);
@@ -178,6 +179,9 @@ export function registerAuthRoutes(app: Express): void {
         deletedAt: u.deletedAt,
         scheduledDeletionDate: u.scheduledDeletionDate,
         deletionReason: u.deletionReason,
+        accountType: u.accountType ?? "free",
+        subscriptionStatus: u.subscriptionStatus,
+        isBlocked: u.isBlocked ?? false,
       })));
     } catch (error) {
       console.error("Error fetching users:", error);

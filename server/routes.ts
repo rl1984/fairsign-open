@@ -2,7 +2,18 @@ import type { Express, Request, Response, NextFunction } from "express";
 import express from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { getStorageBackend, type IStorageBackend } from "./services/storageBackend";
+import { 
+  getStorageBackend, 
+  type IStorageBackend,
+  createUserStorageBackend,
+  type DropboxCredentials,
+  type BoxCredentials,
+  type CustomS3Credentials,
+  getStorageBucketInfo,
+  type DataRegion,
+  getStorageBackendForRegion,
+} from "./services/storageBackend";
+import { decryptToken } from "./services/externalStorage";
 import { createDocumentRequestSchema } from "@shared/schema";
 import { renderHtmlToPdf, renderDocumentFromTemplate } from "./services/pdfRender";
 import { stampSignaturesIntoPdf, appendAuditTrailPage } from "./services/pdfStamp";
@@ -17,6 +28,9 @@ import {
 } from "./services/emailService";
 import { setupAuth, registerAuthRoutes, isAuthenticated } from "./replit_integrations/auth";
 import { authStorage } from "./replit_integrations/auth/storage";
+import { getTierLimits, isEnterprise, isProOrHigher } from "@shared/models/auth";
+import { createFeatureAccessMiddleware } from "./middleware/feature-access";
+import { createBearerAuthMiddleware } from "./middleware/bearer-auth";
 import { nanoid } from "nanoid";
 import { createHash } from "crypto";
 import multer from "multer";
@@ -74,6 +88,179 @@ async function getAccessibleUserIds(userId: string): Promise<string[]> {
   return userIds;
 }
 
+// Resolve storage bucket and region for document creation
+// Enterprise users use their dataRegion setting, others default to EU
+// Returns both metadata (for DB storage) and the actual backend for uploading
+async function resolveDocumentStorageContext(userId?: string): Promise<{ 
+  storageBucket: string; 
+  storageRegion: DataRegion;
+  backend: IStorageBackend;
+}> {
+  const defaultRegion: DataRegion = "EU";
+  
+  if (!userId) {
+    // API-based calls without user context default to EU
+    const info = getStorageBucketInfo(defaultRegion);
+    return { ...info, backend: getStorageBackendForRegion(defaultRegion) };
+  }
+  
+  try {
+    const user = await authStorage.getUser(userId);
+    if (!user) {
+      const info = getStorageBucketInfo(defaultRegion);
+      return { ...info, backend: getStorageBackendForRegion(defaultRegion) };
+    }
+    
+    // Only Enterprise users can use non-default regions
+    if (user.accountType === "enterprise" && user.dataRegion) {
+      const region = user.dataRegion as DataRegion;
+      const info = getStorageBucketInfo(region);
+      return { ...info, backend: getStorageBackendForRegion(region) };
+    }
+    
+    // Free and Pro users always use EU
+    const info = getStorageBucketInfo(defaultRegion);
+    return { ...info, backend: getStorageBackendForRegion(defaultRegion) };
+  } catch (error) {
+    console.error("Error resolving storage context:", error);
+    const info = getStorageBucketInfo(defaultRegion);
+    return { ...info, backend: getStorageBackendForRegion(defaultRegion) };
+  }
+}
+
+// Get user's preferred storage backend with loaded credentials
+async function getUserStorageBackend(userId: string): Promise<{ backend: IStorageBackend; provider: string }> {
+  const user = await authStorage.getUser(userId);
+  const provider = user?.storageProvider || "fairsign";
+  
+  // For default storage, just return the global object storage
+  if (provider === "fairsign") {
+    return { backend: objectStorage, provider };
+  }
+  
+  // Verify Pro or Enterprise status for custom storage providers
+  const isPro = user?.accountType === "pro" || user?.accountType === "enterprise";
+  if (!isPro) {
+    console.log(`[Storage] User ${userId} has ${provider} selected but is not Pro/Enterprise, falling back to default`);
+    return { backend: objectStorage, provider: "fairsign" };
+  }
+  
+  // For custom S3, load and decrypt credentials
+  if (provider === "custom_s3") {
+    const s3Creds = await authStorage.getUserS3Credentials(userId);
+    if (!s3Creds) {
+      console.log(`[Storage] User ${userId} has custom_s3 selected but no credentials, falling back to default`);
+      return { backend: objectStorage, provider: "fairsign" };
+    }
+    
+    try {
+      const customS3Credentials: CustomS3Credentials = {
+        endpoint: decryptToken(s3Creds.endpoint, userId),
+        bucket: decryptToken(s3Creds.bucket, userId),
+        accessKeyId: decryptToken(s3Creds.accessKeyId, userId),
+        secretAccessKey: decryptToken(s3Creds.secretAccessKey, userId),
+        region: s3Creds.region ? decryptToken(s3Creds.region, userId) : undefined,
+      };
+      
+      const backend = createUserStorageBackend(
+        { userId, provider: "custom_s3" },
+        customS3Credentials
+      );
+      return { backend, provider };
+    } catch (error) {
+      console.error(`[Storage] Failed to load custom S3 credentials for user ${userId}:`, error);
+      return { backend: objectStorage, provider: "fairsign" };
+    }
+  }
+  
+  // For Dropbox, load and decrypt OAuth credentials
+  if (provider === "dropbox") {
+    const creds = await authStorage.getStorageCredentials(userId, "dropbox");
+    if (!creds || !creds.accessTokenEncrypted) {
+      console.log(`[Storage] User ${userId} has dropbox selected but no credentials, falling back to default`);
+      return { backend: objectStorage, provider: "fairsign" };
+    }
+    
+    try {
+      const dropboxCredentials: DropboxCredentials = {
+        accessToken: decryptToken(creds.accessTokenEncrypted, userId),
+        refreshToken: creds.refreshTokenEncrypted ? decryptToken(creds.refreshTokenEncrypted, userId) : undefined,
+        tokenExpiresAt: creds.tokenExpiresAt,
+        // Callback to persist refreshed tokens
+        onTokenRefresh: async (newAccessToken: string, expiresAt: Date) => {
+          const { encryptToken } = await import("./services/externalStorage");
+          await authStorage.saveStorageCredential({
+            userId,
+            provider: "dropbox",
+            accessTokenEncrypted: encryptToken(newAccessToken, userId),
+            refreshTokenEncrypted: creds.refreshTokenEncrypted, // Keep existing refresh token
+            tokenExpiresAt: expiresAt,
+            providerEmail: creds.providerEmail,
+            isActive: true,
+          });
+          console.log(`[Storage] Refreshed Dropbox token for user ${userId}`);
+        },
+      };
+      
+      const backend = createUserStorageBackend(
+        { userId, provider: "dropbox" },
+        undefined, // no custom S3
+        dropboxCredentials
+      );
+      return { backend, provider };
+    } catch (error) {
+      console.error(`[Storage] Failed to load Dropbox credentials for user ${userId}:`, error);
+      return { backend: objectStorage, provider: "fairsign" };
+    }
+  }
+  
+  // For Box, load and decrypt OAuth credentials
+  if (provider === "box") {
+    const creds = await authStorage.getStorageCredentials(userId, "box");
+    if (!creds || !creds.accessTokenEncrypted) {
+      console.log(`[Storage] User ${userId} has box selected but no credentials, falling back to default`);
+      return { backend: objectStorage, provider: "fairsign" };
+    }
+    
+    try {
+      const boxCredentials: BoxCredentials = {
+        accessToken: decryptToken(creds.accessTokenEncrypted, userId),
+        refreshToken: creds.refreshTokenEncrypted ? decryptToken(creds.refreshTokenEncrypted, userId) : undefined,
+        tokenExpiresAt: creds.tokenExpiresAt,
+        onTokenRefresh: async (newAccessToken: string, newRefreshToken: string | undefined, expiresAt: Date) => {
+          const { encryptToken } = await import("./services/externalStorage");
+          await authStorage.saveStorageCredential({
+            userId,
+            provider: "box",
+            accessTokenEncrypted: encryptToken(newAccessToken, userId),
+            // Box rotates refresh tokens - save the new one if provided
+            refreshTokenEncrypted: newRefreshToken ? encryptToken(newRefreshToken, userId) : creds.refreshTokenEncrypted,
+            tokenExpiresAt: expiresAt,
+            providerEmail: creds.providerEmail,
+            isActive: true,
+          });
+          console.log(`[Storage] Refreshed Box token for user ${userId}`);
+        },
+      };
+      
+      const backend = createUserStorageBackend(
+        { userId, provider: "box" },
+        undefined, // no custom S3
+        undefined, // no Dropbox
+        boxCredentials
+      );
+      return { backend, provider };
+    } catch (error) {
+      console.error(`[Storage] Failed to load Box credentials for user ${userId}:`, error);
+      return { backend: objectStorage, provider: "fairsign" };
+    }
+  }
+  
+  // For other providers (Google Drive), fall back to default for now
+  console.log(`[Storage] Provider ${provider} not yet implemented, falling back to default`);
+  return { backend: objectStorage, provider: "fairsign" };
+}
+
 // Helper to check if a user can access a template (owner, default, or team member)
 async function canAccessTemplate(userId: string, templateOwnerId: string | null, isDefault: boolean): Promise<boolean> {
   if (isDefault) return true;
@@ -112,7 +299,17 @@ async function validateToken(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: "Token required" });
   }
 
-  const document = await storage.getDocument(documentId);
+  // First try to find document by ID
+  let document = await storage.getDocument(documentId);
+  
+  // If not found by ID, try to find by the token in dataJson->token (for embedded signing URLs)
+  if (!document) {
+    document = await storage.getDocumentByDataJsonToken(token);
+    if (document) {
+      console.log(`[validateToken] Document found by dataJson token, ID: ${document.id}`);
+    }
+  }
+  
   if (!document) {
     return res.status(404).json({ error: "Document not found" });
   }
@@ -124,14 +321,40 @@ async function validateToken(req: Request, res: Response, next: NextFunction) {
     return next();
   }
 
+  // Check dataJson->token for embedded signing compatibility
+  const dataJson = document.dataJson as Record<string, any> | null;
+  if (dataJson?.token === token) {
+    (req as any).document = document;
+    (req as any).signer = null;
+    return next();
+  }
+
   // Check signer-specific token (multi-signer)
-  const signers = await storage.getDocumentSigners(documentId);
+  const signers = await storage.getDocumentSigners(document.id);
   const signer = signers.find(s => s.token === token);
   
   if (signer) {
     (req as any).document = document;
     (req as any).signer = signer;
     return next();
+  }
+
+  // Also check for signer tokens stored in dataJson.signers (for embedded signing)
+  if (dataJson?.signers) {
+    const jsonSigner = (dataJson.signers as Array<{ token?: string; id?: string; name?: string; email?: string }>)
+      .find(s => s.token === token);
+    if (jsonSigner) {
+      (req as any).document = document;
+      (req as any).signer = {
+        id: jsonSigner.id,
+        name: jsonSigner.name,
+        email: jsonSigner.email,
+        token: jsonSigner.token,
+        role: "signer",
+        status: "pending",
+      };
+      return next();
+    }
   }
 
   return res.status(401).json({ error: "Invalid token" });
@@ -144,7 +367,7 @@ export async function registerRoutes(
   // Initialize storage backend
   objectStorage = getStorageBackend();
 
-  // CSP frame-ancestors middleware for iframe embedding
+  // CSP frame-ancestors middleware for iframe embedding (legacy env var based)
   const allowedFrameAncestors = process.env.ALLOWED_FRAME_ANCESTORS;
   if (allowedFrameAncestors) {
     const ancestors = allowedFrameAncestors.split(",").map(s => s.trim()).filter(Boolean);
@@ -162,18 +385,94 @@ export async function registerRoutes(
       next();
     });
   }
+  
+  // Dynamic CSP middleware for embedded signing documents (Enterprise feature)
+  // This sets frame-ancestors based on the document owner's allowedOrigins
+  // For embedded documents, this OVERRIDES the legacy env var middleware
+  app.use("/d/:documentId", async (req, res, next) => {
+    const documentId = req.params.documentId;
+    try {
+      const document = await storage.getDocument(documentId);
+      if (!document) {
+        return next();
+      }
+      
+      const dataJson = document.dataJson as Record<string, any> | null;
+      const isEmbeddedDoc = dataJson?.embeddedSigning === true;
+      
+      if (isEmbeddedDoc && document.userId) {
+        // Embedded documents ALWAYS use document-level CSP (overrides env var)
+        const owner = await authStorage.getUser(document.userId);
+        const allowedOrigins = owner?.allowedOrigins || [];
+        
+        if (allowedOrigins.length > 0) {
+          // Allow embedding from configured origins only
+          res.setHeader("Content-Security-Policy", `frame-ancestors 'self' ${allowedOrigins.join(" ")}`);
+          res.setHeader("X-Frame-Options", `ALLOW-FROM ${allowedOrigins[0]}`);
+        } else {
+          // Embedded doc but no origins configured - block embedding
+          res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
+          res.setHeader("X-Frame-Options", "SAMEORIGIN");
+        }
+      } else if (!allowedFrameAncestors) {
+        // Regular signing page without env var config - deny framing
+        res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
+        res.setHeader("X-Frame-Options", "SAMEORIGIN");
+      }
+      // If env var is set AND not an embedded doc, the previous middleware already set CSP
+    } catch (error) {
+      console.error("[CSP Middleware] Error checking document for CSP:", error);
+    }
+    next();
+  });
 
   // Setup authentication (must be before other routes)
   await setupAuth(app);
   registerAuthRoutes(app);
+  
+  // Apply bearer auth middleware to support API key authentication
+  // This must be AFTER session setup so req.session exists
+  const bearerAuth = createBearerAuthMiddleware(authStorage);
+  app.use(bearerAuth);
+  
+  // Create feature access middleware for tier-gated features
+  const checkFeatureAccess = createFeatureAccessMiddleware(authStorage);
 
-  // Seed default templates and signature spots
-  await seedDefaultTemplates();
+  // Seed signature spots (default templates removed - users create their own)
   await seedSignatureSpots();
 
   // Health check endpoint
   app.get("/health", (_req: Request, res: Response) => {
     res.status(200).json({ ok: true });
+  });
+
+  // Fallback subscription status endpoint (used when Stripe is not configured)
+  // This endpoint is overridden by the EE payments module when Stripe is configured
+  app.get("/api/subscription/status", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Return subscription status from database (works without Stripe)
+      res.json({
+        accountType: user.accountType || "free",
+        subscriptionStatus: user.subscriptionStatus || null,
+        currentPeriodEnd: user.subscriptionCurrentPeriodEnd || null,
+        documentsUsed: parseInt(user.documentsThisMonth || "0", 10),
+        documentLimit: user.accountType === "pro" ? -1 : 5,
+        canCreateDocument: user.accountType === "pro" || parseInt(user.documentsThisMonth || "0", 10) < 5,
+      });
+    } catch (error) {
+      console.error("Error getting subscription status:", error);
+      res.status(500).json({ error: "Failed to get subscription status" });
+    }
   });
 
   // Create a new document
@@ -196,12 +495,18 @@ export async function registerRoutes(
       console.log(`Rendering document from template: ${template_id}`);
       const pdfBuffer = await renderDocumentFromTemplate(template_id, data);
 
-      // Upload unsigned PDF to object storage
-      const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
-      await objectStorage.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
-      console.log(`Uploaded unsigned PDF: ${unsignedPdfKey}`);
+      // Calculate SHA-256 hash of the original rendered PDF before any modifications
+      const originalHash = createHash("sha256").update(pdfBuffer).digest("hex");
 
-      // Create document record
+      // Get storage context (API calls without user context default to EU)
+      const storageContext = await resolveDocumentStorageContext();
+
+      // Upload unsigned PDF to region-specific storage backend
+      const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
+      await storageContext.backend.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
+      console.log(`Uploaded unsigned PDF: ${unsignedPdfKey} to ${storageContext.storageRegion} region`);
+
+      // Create document record with storage bucket info
       const document = await storage.createDocument({
         templateId: template_id,
         status: "created",
@@ -211,6 +516,9 @@ export async function registerRoutes(
         unsignedPdfKey,
         signedPdfKey: null,
         signedPdfSha256: null,
+        originalHash, // SHA-256 hash of original PDF before modifications
+        storageBucket: storageContext.storageBucket,
+        storageRegion: storageContext.storageRegion,
       });
 
       // Log audit event
@@ -299,6 +607,8 @@ export async function registerRoutes(
         w: number;
         h: number;
         role?: string;
+        placeholder?: string;
+        inputMode?: string;
       }>;
 
       // Track which spots belong to this signer (for signing, not display)
@@ -316,6 +626,9 @@ export async function registerRoutes(
           width: number;
           height: number;
           creatorFills?: boolean;
+          placeholder?: string;
+          inputMode?: string;
+          isDocumentDate?: boolean;
         }>;
 
         // Include ALL spots for rendering (including creatorFills for visual context)
@@ -331,6 +644,9 @@ export async function registerRoutes(
           h: field.height,
           role: field.signerId,
           creatorFills: field.creatorFills || false, // Pass through for UI rendering
+          placeholder: field.placeholder, // Pass placeholder text for text/date fields
+          inputMode: field.inputMode, // Pass input mode (numeric, text, any)
+          isDocumentDate: field.isDocumentDate || false, // Auto-fill with signing date
         }));
 
         // Track only non-creatorFills spots this signer needs to complete
@@ -376,6 +692,7 @@ export async function registerRoutes(
       // Log view event
       await logAuditEvent(document.id, "document_viewed", req, {
         signerEmail: signer?.email,
+        signerName: signer?.name,
         signerRole: signer?.role,
       });
 
@@ -396,6 +713,33 @@ export async function registerRoutes(
         }
       }
 
+      // Check if document owner has verified identity and get allowed origins for CSP
+      let senderVerified = false;
+      let allowedOrigins: string[] = [];
+      if (document.userId) {
+        const owner = await authStorage.getUser(document.userId);
+        senderVerified = !!owner?.identityVerifiedAt;
+        allowedOrigins = owner?.allowedOrigins || [];
+      }
+      
+      // Set Content-Security-Policy frame-ancestors header for embedded signing security
+      // If document is marked as embedded signing AND owner has allowed origins, use those
+      // Otherwise, block all iframe embedding
+      const isEmbeddedDoc = dataJson?.embeddedSigning === true;
+      if (isEmbeddedDoc && allowedOrigins.length > 0) {
+        // Allow embedding from configured origins
+        res.setHeader("Content-Security-Policy", `frame-ancestors 'self' ${allowedOrigins.join(" ")}`);
+      } else if (isEmbeddedDoc) {
+        // Embedded doc but no origins configured - block embedding
+        res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
+      } else {
+        // Regular signing page - allow embedding from anywhere for backward compatibility
+        // Users can still access via direct link
+      }
+
+      // Extract embedded signing info for parent frame communication
+      const embeddedRedirectUrl = isEmbeddedDoc ? dataJson?.redirectUrl || null : null;
+
       res.json({
         id: document.id,
         templateId: document.templateId,
@@ -408,6 +752,11 @@ export async function registerRoutes(
         signatureImages, // Map of spotKey -> image URL for rendering on PDF
         textValues, // Map of spotKey -> text value for text/date/checkbox fields
         signerId: signer?.id || null, // The ID of the current signer (for mobile signing sessions)
+        senderVerified, // Whether document owner has verified identity
+        // Embedded signing info for postMessage communication
+        embeddedSigning: isEmbeddedDoc,
+        embeddedRedirectUrl, // Redirect URL after signing (for embedded docs)
+        allowedOrigins: isEmbeddedDoc ? allowedOrigins : [], // For secure postMessage targeting
         currentSigner: signer ? {
           email: signer.email,
           name: signer.name,
@@ -504,6 +853,7 @@ export async function registerRoutes(
         await logAuditEvent(document.id, "signature_uploaded", req, { 
           spotKey,
           signerEmail: signer?.email,
+          signerName: signer?.name,
           signerRole: signer?.role,
         });
 
@@ -656,6 +1006,7 @@ export async function registerRoutes(
       // Log consent
       await logAuditEvent(document.id, "consent_given", req, {
         signerEmail: signer?.email,
+        signerName: signer?.name,
         signerRole: signer?.role,
       });
 
@@ -668,6 +1019,7 @@ export async function registerRoutes(
 
         await logAuditEvent(document.id, "signer_completed", req, {
           signerEmail: signer.email,
+          signerName: signer.name,
           signerRole: signer.role,
         });
 
@@ -708,13 +1060,24 @@ export async function registerRoutes(
               const signLink = `${baseUrl}/d/${document.id}?token=${nextSigner.token}`;
               const documentTitle = docData?.title || docData?.tenant_name || "Document";
               
+              // Check if document owner is identity verified and get sender name
+              let senderVerified = false;
+              let senderName: string | undefined;
+              if (document.userId) {
+                const owner = await authStorage.getUser(document.userId);
+                senderVerified = !!owner?.identityVerifiedAt;
+                senderName = owner ? `${owner.firstName || ''} ${owner.lastName || ''}`.trim() || owner.email : undefined;
+              }
+              
               const { sendSignatureRequestEmailWithUrl } = await import("./services/emailService");
               await sendSignatureRequestEmailWithUrl(
                 document.id,
                 nextSigner.email,
                 nextSigner.name,
                 signLink,
-                documentTitle
+                documentTitle,
+                senderVerified,
+                senderName
               );
               
               console.log(`[Sequential] Email sent to next signer: ${nextSigner.email} (order: ${nextSigner.orderIndex ?? 'N/A'})`);
@@ -823,17 +1186,65 @@ export async function registerRoutes(
       // Calculate SHA-256 hash of stamped PDF (before audit trail)
       const sha256 = createHash("sha256").update(stampedPdfBuffer).digest("hex");
 
+      // Check if document owner is identity verified for audit trail and get sender info
+      let ownerVerified = false;
+      let senderName: string | undefined;
+      let senderEmail: string | undefined;
+      if (document.userId) {
+        const owner = await authStorage.getUser(document.userId);
+        ownerVerified = !!owner?.identityVerifiedAt;
+        senderEmail = owner?.email;
+        senderName = owner ? `${owner.firstName || ''} ${owner.lastName || ''}`.trim() || undefined : undefined;
+      }
+
       // Get audit events and append audit trail page
       const auditEvents = await storage.getAuditEvents(document.id);
       const signedPdfBuffer = await appendAuditTrailPage(stampedPdfBuffer, auditEvents, {
         documentId: document.id,
         documentTitle: docData?.title || docData?.tenant_name || undefined,
         sha256,
+        originalHash: document.originalHash || undefined, // Use pre-signing hash for third-party verification
+        senderVerified: ownerVerified,
+        senderName,
+        senderEmail,
       });
 
-      // Upload signed PDF
+      // Upload signed PDF to user's preferred storage
       const signedPdfKey = `documents/${document.id}/signed.pdf`;
-      await objectStorage.uploadBuffer(signedPdfBuffer, signedPdfKey, "application/pdf");
+      
+      // Get document owner's storage backend
+      const { backend: userStorage, provider: storageProvider } = await getUserStorageBackend(document.userId);
+      
+      // For external storage (Dropbox, etc), use a flat folder structure with document title
+      // Format: /FairSign/{document_title}_{shortId}_signed.pdf
+      const safeDocTitle = (docData?.title || "Document").replace(/[^a-zA-Z0-9\-_\s]/g, "").trim();
+      const externalStorageKey = `${safeDocTitle}_${document.id.slice(0, 8)}_signed.pdf`;
+      
+      try {
+        if (storageProvider !== "fairsign") {
+          // External storage uses flat folder with document title
+          await userStorage.uploadBuffer(signedPdfBuffer, externalStorageKey, "application/pdf");
+          console.log(`[Storage] Uploaded signed PDF to ${storageProvider}: ${externalStorageKey}`);
+        } else {
+          await userStorage.uploadBuffer(signedPdfBuffer, signedPdfKey, "application/pdf");
+          console.log(`[Storage] Uploaded signed PDF to ${storageProvider}: ${signedPdfKey}`);
+        }
+      } catch (uploadError) {
+        console.error(`[Storage] Failed to upload to ${storageProvider}, falling back to default:`, uploadError);
+        // Fallback to default storage if user storage fails
+        await objectStorage.uploadBuffer(signedPdfBuffer, signedPdfKey, "application/pdf");
+        console.log(`[Storage] Uploaded signed PDF to default storage: ${signedPdfKey}`);
+      }
+      
+      // Also always store in default storage for backup/access
+      if (storageProvider !== "fairsign") {
+        try {
+          await objectStorage.uploadBuffer(signedPdfBuffer, signedPdfKey, "application/pdf");
+          console.log(`[Storage] Backup copy uploaded to default storage`);
+        } catch (backupError) {
+          console.error(`[Storage] Failed to create backup copy:`, backupError);
+        }
+      }
 
       // Update document
       await storage.updateDocument(document.id, {
@@ -882,6 +1293,10 @@ export async function registerRoutes(
 
       // Send completion email with signed PDF attachment to all signers
       const documentTitle = docData?.title || docData?.tenant_name || "Document";
+      
+      // Use the already-fetched ownerVerified status for completion emails
+      const senderVerified = ownerVerified;
+      
       try {
         // Get all signers from document_signers table
         const documentSigners = await storage.getDocumentSigners(document.id);
@@ -895,7 +1310,8 @@ export async function registerRoutes(
                 signer.email,
                 signer.name,
                 documentTitle,
-                signedPdfBuffer
+                signedPdfBuffer,
+                senderVerified
               );
               await logAuditEvent(document.id, "completion_email_sent", req, { 
                 recipientEmail: signer.email,
@@ -913,7 +1329,8 @@ export async function registerRoutes(
             docData.tenantEmail,
             docData.tenant_name || "Tenant",
             documentTitle,
-            signedPdfBuffer
+            signedPdfBuffer,
+            senderVerified
           );
           await logAuditEvent(document.id, "completion_email_sent", req, { 
             recipientEmail: docData.tenantEmail,
@@ -1327,11 +1744,17 @@ export async function registerRoutes(
       console.log(`Rendering document from template: ${template_id} (user: ${userId})`);
       const pdfBuffer = await renderDocumentFromTemplate(template_id, data);
 
-      // Upload unsigned PDF to object storage
-      const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
-      await objectStorage.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
+      // Calculate SHA-256 hash of the original rendered PDF before any modifications
+      const originalHash = createHash("sha256").update(pdfBuffer).digest("hex");
 
-      // Create document record with userId
+      // Get storage context based on user's data region setting
+      const storageContext = await resolveDocumentStorageContext(userId);
+
+      // Upload unsigned PDF to region-specific storage backend
+      const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
+      await storageContext.backend.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
+
+      // Create document record with userId and storage bucket info
       const document = await storage.createDocument({
         userId,
         templateId: template_id,
@@ -1342,6 +1765,9 @@ export async function registerRoutes(
         unsignedPdfKey,
         signedPdfKey: null,
         signedPdfSha256: null,
+        originalHash, // SHA-256 hash of original PDF before modifications
+        storageBucket: storageContext.storageBucket,
+        storageRegion: storageContext.storageRegion,
       });
 
       // Log audit event
@@ -1363,146 +1789,6 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error creating admin document:", error);
       res.status(500).json({ error: "Failed to create document" });
-    }
-  });
-
-  // Bulk create documents from array of data (Pro feature)
-  app.post("/api/admin/documents/bulk", isAuthenticated, async (req: Request, res: Response) => {
-    try {
-      const userId = (req.user as any)?.id;
-      if (!userId) {
-        return res.status(401).json({ error: "User not authenticated" });
-      }
-
-      // Check if user has Pro subscription for bulk import
-      const user = await authStorage.getUser(userId);
-      
-      // Admin accounts cannot create documents - they are for platform management only
-      if (user?.isAdmin) {
-        return res.status(403).json({ error: "Admin accounts cannot create documents. Admin accounts are for platform management only." });
-      }
-      
-      if (user?.accountType !== "pro") {
-        return res.status(403).json({ 
-          error: "Bulk import is a Pro feature. Please upgrade your subscription to use this feature." 
-        });
-      }
-
-      const { template_id, documents: documentDataArray, send_emails } = req.body;
-
-      if (!template_id || !Array.isArray(documentDataArray) || documentDataArray.length === 0) {
-        return res.status(400).json({ 
-          error: "template_id and non-empty documents array are required" 
-        });
-      }
-
-      if (documentDataArray.length > 50) {
-        return res.status(400).json({ 
-          error: "Maximum 50 documents can be created at once" 
-        });
-      }
-
-      const results: Array<{
-        success: boolean;
-        document_id?: string;
-        signing_url?: string;
-        email_sent?: boolean;
-        error?: string;
-        row_index: number;
-      }> = [];
-
-      const baseUrl = process.env.BASE_URL || `https://${req.headers.host}`;
-
-      for (let i = 0; i < documentDataArray.length; i++) {
-        const data = documentDataArray[i];
-        
-        try {
-          // Generate signing token
-          const signingToken = nanoid(32);
-
-          // Render document from template (supports both HTML and PDF templates)
-          const pdfBuffer = await renderDocumentFromTemplate(template_id, data);
-
-          // Upload unsigned PDF to object storage
-          const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
-          await objectStorage.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
-
-          // Create document record with userId
-          const document = await storage.createDocument({
-            userId,
-            templateId: template_id,
-            status: "created",
-            dataJson: data,
-            callbackUrl: null,
-            signingToken,
-            unsignedPdfKey,
-            signedPdfKey: null,
-            signedPdfSha256: null,
-          });
-
-          // Log audit event
-          await logAuditEvent(document.id, "document_created", req, { 
-            template_id, 
-            userId, 
-            bulk_create: true,
-            row_index: i 
-          });
-
-          const signingUrl = `${baseUrl}/d/${document.id}?token=${signingToken}`;
-          
-          let emailSent = false;
-          
-          // Optionally send email if recipient email is in data
-          if (send_emails && data.tenant_email) {
-            try {
-              await sendSignatureRequestEmail(
-                document, 
-                data.tenant_email, 
-                data.tenant_name || "Tenant"
-              );
-              await storage.updateDocument(document.id, { status: "sent" });
-              await logAuditEvent(document.id, "email_sent", req, { 
-                recipientEmail: data.tenant_email,
-                emailType: "signature_request"
-              });
-              emailSent = true;
-            } catch (emailError) {
-              console.error(`Failed to send email for bulk document ${i}:`, emailError);
-            }
-          }
-
-          results.push({
-            success: true,
-            document_id: document.id,
-            signing_url: signingUrl,
-            email_sent: emailSent,
-            row_index: i,
-          });
-
-        } catch (docError) {
-          console.error(`Error creating bulk document ${i}:`, docError);
-          results.push({
-            success: false,
-            error: docError instanceof Error ? docError.message : "Unknown error",
-            row_index: i,
-          });
-        }
-      }
-
-      const successCount = results.filter(r => r.success).length;
-      const failureCount = results.filter(r => !r.success).length;
-
-      console.log(`Bulk create: ${successCount} success, ${failureCount} failures by user ${userId}`);
-
-      res.status(201).json({
-        total: documentDataArray.length,
-        success_count: successCount,
-        failure_count: failureCount,
-        results,
-      });
-    } catch (error) {
-      console.error("Error in bulk document creation:", error);
-      res.status(500).json({ error: "Failed to create documents" });
     }
   });
 
@@ -1530,13 +1816,24 @@ export async function registerRoutes(
         return res.status(400).json({ error: "At least one signer is required" });
       }
 
+      // Check signer limit for Free users
+      const tierLimits = getTierLimits(user?.accountType);
+      if (tierLimits.signersPerDocument > 0 && signers.length > tierLimits.signersPerDocument) {
+        return res.status(403).json({
+          error: "Signer limit exceeded",
+          message: `Free accounts can only have ${tierLimits.signersPerDocument} signers per document. Upgrade to Pro for unlimited signers.`,
+          limit: tierLimits.signersPerDocument,
+          requested: signers.length,
+        });
+      }
+
       // Fetch template
-      const template = await storage.getTemplateById(templateId);
+      const template = await storage.getTemplate(templateId);
       if (!template) {
         return res.status(404).json({ error: "Template not found" });
       }
 
-      if (template.templateType !== "pdf" || !template.pdfKey) {
+      if (template.templateType !== "pdf" || !template.pdfStorageKey) {
         return res.status(400).json({ error: "Template must be a PDF template" });
       }
 
@@ -1544,7 +1841,10 @@ export async function registerRoutes(
       const templateFields = await storage.getTemplateFields(templateId);
 
       // Download the template PDF
-      const pdfBuffer = await objectStorage.downloadBuffer(template.pdfKey);
+      const pdfBuffer = await objectStorage.downloadBuffer(template.pdfStorageKey);
+
+      // Calculate SHA-256 hash of the original template PDF before any modifications
+      const originalHash = createHash("sha256").update(pdfBuffer).digest("hex");
 
       // Stamp creator-filled fields onto the PDF
       let modifiedPdfBuffer = pdfBuffer;
@@ -1610,20 +1910,43 @@ export async function registerRoutes(
         modifiedPdfBuffer = Buffer.from(await pdfDoc.save());
       }
 
-      // Upload the modified PDF
+      // Get storage context based on user's data region setting
+      const storageContext = await resolveDocumentStorageContext(userId);
+
+      // Upload the modified PDF to region-specific storage backend
       const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
-      await objectStorage.uploadBuffer(modifiedPdfBuffer, unsignedPdfKey, "application/pdf");
+      await storageContext.backend.uploadBuffer(modifiedPdfBuffer, unsignedPdfKey, "application/pdf");
 
       // Generate document-level signing token
       const signingToken = nanoid(32);
 
-      // Create document record
+      // Convert template fields to document field format (matching one-off document structure)
+      const documentFields = templateFields
+        .filter(f => !f.creatorFills) // Exclude creator-filled fields (they're stamped on PDF)
+        .map((field, idx) => ({
+          id: `field_${Date.now()}_${idx}`,
+          fieldType: field.fieldType,
+          signerId: field.signerRole, // Use signerRole as signerId for template-based documents
+          page: field.page,
+          x: Number(field.x),
+          y: Number(field.y),
+          width: Number(field.width),
+          height: Number(field.height),
+          required: field.required ?? true,
+          label: field.label || field.apiTag,
+          placeholder: field.placeholder || "",
+          inputMode: field.inputMode || "any",
+          isDocumentDate: field.isDocumentDate || false,
+        }));
+
+      // Create document record with storage bucket info
       const document = await storage.createDocument({
         userId,
         templateId,
         status: "created",
         dataJson: {
           signers,
+          fields: documentFields,
           creatorFieldValues,
           fromTemplate: true,
         },
@@ -1632,6 +1955,9 @@ export async function registerRoutes(
         unsignedPdfKey,
         signedPdfKey: null,
         signedPdfSha256: null,
+        originalHash, // SHA-256 hash of original template PDF before modifications
+        storageBucket: storageContext.storageBucket,
+        storageRegion: storageContext.storageRegion,
       });
 
       console.log(`[From Template] Document created: ${document.id} from template ${templateId}`);
@@ -1667,28 +1993,6 @@ export async function registerRoutes(
           status: "pending",
           orderIndex,
         });
-
-        // Create signature spots for this signer's role (excluding creatorFills fields)
-        const signerFields = templateFields.filter(
-          f => f.signerRole === signer.role && !f.creatorFills
-        );
-
-        for (const field of signerFields) {
-          const spotKey = `${document.id}_${signer.role}_${field.apiTag}`;
-          await storage.createSignatureSpot({
-            documentId: document.id,
-            key: spotKey,
-            fieldType: field.fieldType,
-            label: field.label || field.apiTag,
-            page: field.page,
-            x: Number(field.x),
-            y: Number(field.y),
-            width: Number(field.width),
-            height: Number(field.height),
-            signerRole: signer.role,
-            required: field.required ?? true,
-          });
-        }
 
         const signLink = `${baseUrl}/d/${document.id}?token=${signerToken}`;
         signerLinks.push({
@@ -1786,6 +2090,7 @@ export async function registerRoutes(
         inputMode?: string;
         creatorFills?: boolean;
         creatorValue?: string;
+        isDocumentDate?: boolean;
       }>;
       let documentTitle: string;
       let sendEmails: boolean;
@@ -1802,6 +2107,17 @@ export async function registerRoutes(
       // Validate signers
       if (!Array.isArray(signers) || signers.length === 0) {
         return res.status(400).json({ error: "At least one signer is required" });
+      }
+
+      // Check signer limit for Free users
+      const tierLimits = getTierLimits(userRecord?.accountType);
+      if (tierLimits.signersPerDocument > 0 && signers.length > tierLimits.signersPerDocument) {
+        return res.status(403).json({
+          error: "Signer limit exceeded",
+          message: `Free accounts can only have ${tierLimits.signersPerDocument} signers per document. Upgrade to Pro for unlimited signers.`,
+          limit: tierLimits.signersPerDocument,
+          requested: signers.length,
+        });
       }
 
       for (const signer of signers) {
@@ -1830,6 +2146,11 @@ export async function registerRoutes(
           });
         }
       }
+
+      // Calculate SHA-256 hash of the original PDF before any modifications
+      // This allows third-party verification of the original blank document
+      const originalHash = createHash("sha256").update(file.buffer).digest("hex");
+      console.log(`[One-Off] Original document hash: ${originalHash}`);
 
       // Stamp creator-filled fields onto the PDF before uploading
       let pdfBuffer = file.buffer;
@@ -1880,15 +2201,18 @@ export async function registerRoutes(
         console.log(`[One-Off] Creator-filled fields stamped successfully`);
       }
 
-      // Upload PDF to object storage
+      // Get storage context based on user's data region setting
+      const storageContext = await resolveDocumentStorageContext(userId);
+
+      // Upload PDF to region-specific storage backend
       const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
-      await objectStorage.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
-      console.log(`[One-Off] Uploaded PDF: ${unsignedPdfKey}`);
+      await storageContext.backend.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
+      console.log(`[One-Off] Uploaded PDF: ${unsignedPdfKey} to ${storageContext.storageRegion} region`);
 
       // Generate document-level signing token (for backward compatibility)
       const signingToken = nanoid(32);
 
-      // Create document record with null templateId
+      // Create document record with null templateId and storage bucket info
       const document = await storage.createDocument({
         userId,
         templateId: null,
@@ -1904,6 +2228,9 @@ export async function registerRoutes(
         unsignedPdfKey,
         signedPdfKey: null,
         signedPdfSha256: null,
+        originalHash, // SHA-256 hash of original blank PDF before modifications
+        storageBucket: storageContext.storageBucket,
+        storageRegion: storageContext.storageRegion,
       });
 
       console.log(`[One-Off] Document created: ${document.id}`);
@@ -1958,13 +2285,20 @@ export async function registerRoutes(
         // Only send email to the first signer (orderIndex 0) for sequential signing
         if (sendEmails && orderIndex === 0) {
           try {
+            // Check if document owner is identity verified and get sender name
+            const owner = await authStorage.getUser(userId);
+            const senderVerified = !!owner?.identityVerifiedAt;
+            const senderName = owner ? `${owner.firstName || ''} ${owner.lastName || ''}`.trim() || owner.email : undefined;
+            
             const { sendSignatureRequestEmailWithUrl } = await import("./services/emailService");
             await sendSignatureRequestEmailWithUrl(
               document.id,
               signer.email,
               signer.name,
               signLink,
-              documentTitle
+              documentTitle,
+              senderVerified,
+              senderName
             );
             emailSent = true;
             console.log(`[One-Off] Email sent to first signer: ${signer.email}`);
@@ -2031,16 +2365,26 @@ export async function registerRoutes(
         connectedAt: c.createdAt,
       }));
 
-      const { getAvailableProviders, isProviderConfigured, isS3StorageAvailable } = await import("./services/externalStorage");
+      // Check if user has custom S3 credentials
+      const customS3Creds = await authStorage.getUserS3Credentials(userId);
+      const hasCustomS3 = !!customS3Creds;
+
+      const { getAvailableProviders, isProviderConfigured } = await import("./services/externalStorage");
       const { isS3StorageAvailable: s3Available } = await import("./services/storageBackend");
+
+      const isPro = user.accountType === "pro" || user.accountType === "enterprise";
 
       const providers = getAvailableProviders().map(p => ({
         ...p,
         connected: p.provider === "fairsign" 
           ? true 
-          : connectedProviders.some(c => c.provider === p.provider),
+          : p.provider === "custom_s3"
+            ? hasCustomS3
+            : connectedProviders.some(c => c.provider === p.provider),
         configured: isProviderConfigured(p.provider),
         connectedEmail: connectedProviders.find(c => c.provider === p.provider)?.email,
+        // Pro-only providers are hidden for free users
+        hidden: p.requiresPro && !isPro,
       }));
 
       res.json({
@@ -2049,6 +2393,7 @@ export async function registerRoutes(
         encryptionSalt: user.encryptionKeySalt,
         providers,
         s3Available: s3Available(),
+        isPro,
       });
     } catch (error) {
       console.error("Error fetching storage settings:", error);
@@ -2072,16 +2417,35 @@ export async function registerRoutes(
 
       const { storageProvider } = parsed.data;
 
+      // Get user to check account type
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Pro-only providers check
+      const isPro = user.accountType === "pro" || user.accountType === "enterprise";
+      if (["custom_s3", "google_drive", "dropbox", "box"].includes(storageProvider) && !isPro) {
+        return res.status(403).json({ error: "This storage provider is only available for Pro accounts" });
+      }
+
       // Verify provider is connected (except for fairsign which is always available)
       if (storageProvider !== "fairsign") {
-        const creds = await authStorage.getStorageCredentials(userId, storageProvider);
-        if (!creds) {
-          return res.status(400).json({ error: `Please connect your ${storageProvider} account first` });
+        if (storageProvider === "custom_s3") {
+          const s3Creds = await authStorage.getUserS3Credentials(userId);
+          if (!s3Creds) {
+            return res.status(400).json({ error: "Please configure your S3 credentials first" });
+          }
+        } else {
+          const creds = await authStorage.getStorageCredentials(userId, storageProvider);
+          if (!creds) {
+            return res.status(400).json({ error: `Please connect your ${storageProvider} account first` });
+          }
         }
       }
 
-      const user = await authStorage.updateStorageProvider(userId, storageProvider);
-      res.json({ success: true, storageProvider: user?.storageProvider });
+      const updatedUser = await authStorage.updateStorageProvider(userId, storageProvider);
+      res.json({ success: true, storageProvider: updatedUser?.storageProvider });
     } catch (error) {
       console.error("Error updating storage settings:", error);
       res.status(500).json({ error: "Failed to update storage settings" });
@@ -2112,6 +2476,168 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error setting up encryption:", error);
       res.status(500).json({ error: "Failed to setup encryption" });
+    }
+  });
+
+  // ============ DATA RESIDENCY ============
+  
+  // Get data residency settings
+  app.get("/api/user/data-region", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const { isRegionalStorageAvailable } = await import("./services/storageBackend");
+      
+      res.json({
+        dataRegion: user.dataRegion || "EU",
+        isEnterprise: user.accountType === "enterprise",
+        canChange: user.accountType === "enterprise",
+        available: isRegionalStorageAvailable(),
+        regions: [
+          { value: "EU", label: "Europe (Ireland/Germany) - Default" },
+          { value: "US", label: "United States (Virginia)" },
+        ],
+      });
+    } catch (error) {
+      console.error("Error fetching data region:", error);
+      res.status(500).json({ error: "Failed to fetch data region settings" });
+    }
+  });
+
+  // Update data region (Enterprise only) - uses feature access middleware
+  app.patch("/api/user/data-region", isAuthenticated, checkFeatureAccess("data_residency"), async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const { dataRegion } = req.body;
+      if (!dataRegion || !["EU", "US"].includes(dataRegion)) {
+        return res.status(400).json({ error: "Invalid data region. Must be 'EU' or 'US'." });
+      }
+
+      // Check if regional storage is available
+      const { isRegionalStorageAvailable } = await import("./services/storageBackend");
+      if (!isRegionalStorageAvailable() && dataRegion === "US") {
+        return res.status(400).json({ error: "US region is not currently available" });
+      }
+
+      const updatedUser = await authStorage.updateDataRegion(userId, dataRegion);
+      
+      res.json({
+        success: true,
+        dataRegion: updatedUser?.dataRegion,
+        message: `Data residency updated to ${dataRegion}. New documents will be stored in the ${dataRegion === "EU" ? "European" : "United States"} region.`,
+      });
+    } catch (error) {
+      console.error("Error updating data region:", error);
+      res.status(500).json({ error: "Failed to update data region" });
+    }
+  });
+
+  // ============ ALLOWED ORIGINS (Enterprise Embedded Signing API) ============
+  
+  // Get allowed origins for embedded signing
+  app.get("/api/user/allowed-origins", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const isEnterpriseUser = user.accountType === "enterprise";
+      
+      res.json({
+        allowedOrigins: user.allowedOrigins || [],
+        isEnterprise: isEnterpriseUser,
+        canEdit: isEnterpriseUser,
+      });
+    } catch (error) {
+      console.error("Error fetching allowed origins:", error);
+      res.status(500).json({ error: "Failed to fetch allowed origins" });
+    }
+  });
+
+  // Update allowed origins for embedded signing (Enterprise only)
+  app.patch("/api/user/allowed-origins", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // STRICT Enterprise-only enforcement using shared tier helper
+      if (!isEnterprise(user.accountType)) {
+        return res.status(403).json({
+          error: "Enterprise subscription required",
+          message: "Configuring allowed origins for embedded signing is an Enterprise-only feature.",
+        });
+      }
+
+      const { allowedOrigins } = req.body;
+      if (!Array.isArray(allowedOrigins)) {
+        return res.status(400).json({ error: "allowedOrigins must be an array of URLs" });
+      }
+
+      // Validate each origin is a valid URL with protocol
+      const validOrigins: string[] = [];
+      for (const origin of allowedOrigins) {
+        if (typeof origin !== "string" || !origin.trim()) continue;
+        try {
+          const url = new URL(origin.trim());
+          // Only allow http/https origins
+          if (url.protocol !== "http:" && url.protocol !== "https:") {
+            return res.status(400).json({ error: `Invalid origin protocol: ${origin}. Must be http or https.` });
+          }
+          // Store just the origin (protocol + host + port)
+          validOrigins.push(url.origin);
+        } catch {
+          return res.status(400).json({ error: `Invalid URL format: ${origin}` });
+        }
+      }
+
+      // Import db and users for update
+      const { db } = await import("./db");
+      const { users } = await import("@shared/models/auth");
+      const { eq } = await import("drizzle-orm");
+
+      await db.update(users).set({
+        allowedOrigins: validOrigins,
+        updatedAt: new Date(),
+      }).where(eq(users.id, userId));
+
+      res.json({
+        success: true,
+        allowedOrigins: validOrigins,
+        message: `Updated allowed origins. ${validOrigins.length} origin(s) configured for embedded signing.`,
+      });
+    } catch (error) {
+      console.error("Error updating allowed origins:", error);
+      res.status(500).json({ error: "Failed to update allowed origins" });
     }
   });
 
@@ -2305,6 +2831,415 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error disconnecting provider:", error);
       res.status(500).json({ error: "Failed to disconnect provider" });
+    }
+  });
+
+  // Test Dropbox connection
+  app.post("/api/storage/test/dropbox", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Check if user is Pro
+      const user = await authStorage.getUser(userId);
+      if (!user || (user.accountType !== "pro" && user.accountType !== "enterprise")) {
+        return res.status(403).json({ error: "Dropbox storage is a Pro feature" });
+      }
+
+      // Get Dropbox credentials
+      const creds = await authStorage.getStorageCredentials(userId, "dropbox");
+      if (!creds || !creds.accessTokenEncrypted) {
+        return res.status(400).json({ error: "Dropbox not connected. Please connect your Dropbox account first." });
+      }
+
+      const { decryptToken } = await import("./services/externalStorage");
+      const accessToken = decryptToken(creds.accessTokenEncrypted, userId);
+
+      // Test by getting account info (requires account_info.read scope)
+      const accountResponse = await fetch("https://api.dropboxapi.com/2/users/get_current_account", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!accountResponse.ok) {
+        const errorText = await accountResponse.text();
+        console.error("[Dropbox Test] Account info failed:", errorText);
+        
+        // Check for specific scope errors
+        if (errorText.includes("files.content.write")) {
+          return res.status(400).json({ 
+            success: false, 
+            error: "Missing 'files.content.write' permission. Please enable this scope in your Dropbox App Console and reconnect." 
+          });
+        }
+        if (errorText.includes("files.content.read")) {
+          return res.status(400).json({ 
+            success: false, 
+            error: "Missing 'files.content.read' permission. Please enable this scope in your Dropbox App Console and reconnect." 
+          });
+        }
+        
+        return res.status(400).json({ 
+          success: false, 
+          error: `Dropbox authentication failed. Please disconnect and reconnect your Dropbox account.` 
+        });
+      }
+
+      const accountInfo = await accountResponse.json();
+      console.log("[Dropbox Test] Account info success:", accountInfo.email);
+
+      // Test file write permission by uploading a small test file
+      const testFileName = `/FairSign/.connection_test_${Date.now()}.txt`;
+      const testContent = `FairSign connection test - ${new Date().toISOString()}`;
+
+      const uploadResponse = await fetch("https://content.dropboxapi.com/2/files/upload", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Dropbox-API-Arg": JSON.stringify({
+            path: testFileName,
+            mode: "overwrite",
+            autorename: false,
+            mute: true,
+          }),
+          "Content-Type": "application/octet-stream",
+        },
+        body: testContent,
+      });
+
+      if (!uploadResponse.ok) {
+        const errorText = await uploadResponse.text();
+        console.error("[Dropbox Test] Upload failed:", errorText);
+        
+        if (errorText.includes("files.content.write")) {
+          return res.status(400).json({ 
+            success: false, 
+            error: "Missing 'files.content.write' permission. Please enable this scope in your Dropbox App Console (Permissions tab), click Submit, then disconnect and reconnect your Dropbox account to get new tokens." 
+          });
+        }
+        
+        return res.status(400).json({ 
+          success: false, 
+          error: `Write permission test failed: ${errorText}` 
+        });
+      }
+
+      console.log("[Dropbox Test] Upload test successful");
+
+      // Clean up test file
+      try {
+        await fetch("https://api.dropboxapi.com/2/files/delete_v2", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ path: testFileName }),
+        });
+      } catch (cleanupError) {
+        // Ignore cleanup errors
+      }
+
+      res.json({ 
+        success: true, 
+        message: `Connection successful! Connected as ${accountInfo.email}. FairSign can read and write files to your Dropbox.`,
+        email: accountInfo.email,
+      });
+    } catch (error) {
+      console.error("Error testing Dropbox connection:", error);
+      res.status(500).json({ 
+        success: false, 
+        error: error instanceof Error ? error.message : "Failed to test Dropbox connection" 
+      });
+    }
+  });
+
+  // Test Box connection
+  app.post("/api/storage/test/box", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Check if user is Pro
+      const user = await authStorage.getUser(userId);
+      if (!user || (user.accountType !== "pro" && user.accountType !== "enterprise")) {
+        return res.status(403).json({ error: "Box storage is a Pro feature" });
+      }
+
+      // Get Box credentials
+      const creds = await authStorage.getStorageCredentials(userId, "box");
+      if (!creds || !creds.accessTokenEncrypted) {
+        return res.status(400).json({ error: "Box not connected. Please connect your Box account first." });
+      }
+
+      const { decryptToken } = await import("./services/externalStorage");
+      const accessToken = decryptToken(creds.accessTokenEncrypted, userId);
+
+      // Test by getting user info
+      const userResponse = await fetch("https://api.box.com/2.0/users/me", {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!userResponse.ok) {
+        const errorText = await userResponse.text();
+        console.error("[Box Test] User info failed:", errorText);
+        return res.status(400).json({ 
+          success: false, 
+          error: `Box authentication failed. Please disconnect and reconnect your Box account.` 
+        });
+      }
+
+      const userInfo = await userResponse.json();
+      console.log("[Box Test] User info success:", userInfo.login);
+
+      // Test folder creation/access
+      const folderCheckResponse = await fetch("https://api.box.com/2.0/folders/0/items?fields=id,name,type", {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!folderCheckResponse.ok) {
+        const errorText = await folderCheckResponse.text();
+        console.error("[Box Test] Folder access failed:", errorText);
+        return res.status(400).json({ 
+          success: false, 
+          error: `Failed to access Box folders. Please check permissions.` 
+        });
+      }
+
+      // Check if FairSign folder exists, create if not
+      const folderData = await folderCheckResponse.json();
+      let fairSignFolderId = folderData.entries?.find(
+        (item: any) => item.type === "folder" && item.name === "FairSign"
+      )?.id;
+
+      if (!fairSignFolderId) {
+        // Create FairSign folder
+        const createFolderResponse = await fetch("https://api.box.com/2.0/folders", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: "FairSign",
+            parent: { id: "0" },
+          }),
+        });
+
+        if (createFolderResponse.ok) {
+          const newFolder = await createFolderResponse.json();
+          fairSignFolderId = newFolder.id;
+          console.log("[Box Test] Created FairSign folder:", fairSignFolderId);
+        } else if (createFolderResponse.status === 409) {
+          // Folder already exists (race condition), extract ID from conflict
+          const conflictData = await createFolderResponse.json();
+          fairSignFolderId = conflictData.context_info?.conflicts?.[0]?.id;
+        }
+      }
+
+      console.log("[Box Test] FairSign folder ready:", fairSignFolderId);
+
+      res.json({ 
+        success: true, 
+        message: `Connection successful! Connected as ${userInfo.login}. FairSign folder is ready in your Box.`,
+        email: userInfo.login,
+      });
+    } catch (error) {
+      console.error("Error testing Box connection:", error);
+      res.status(500).json({ 
+        success: false, 
+        error: error instanceof Error ? error.message : "Failed to test Box connection" 
+      });
+    }
+  });
+
+  // ============ CUSTOM S3 STORAGE ENDPOINTS ============
+
+  // Get user's custom S3 credentials (masked)
+  app.get("/api/storage/custom-s3", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Check if user is Pro
+      const user = await authStorage.getUser(userId);
+      if (!user || (user.accountType !== "pro" && user.accountType !== "enterprise")) {
+        return res.status(403).json({ error: "Custom S3 storage is a Pro feature" });
+      }
+
+      const { decryptToken } = await import("./services/externalStorage");
+      const creds = await authStorage.getUserS3Credentials(userId);
+      
+      if (!creds) {
+        return res.json({ configured: false });
+      }
+
+      // Return masked credentials
+      res.json({
+        configured: true,
+        endpoint: decryptToken(creds.endpointEncrypted, userId),
+        bucket: decryptToken(creds.bucketEncrypted, userId),
+        accessKeyId: "••••••••" + decryptToken(creds.accessKeyIdEncrypted, userId).slice(-4),
+        region: creds.region || "auto",
+        prefix: creds.prefix || "",
+        label: creds.label || "",
+        lastTestedAt: creds.lastTestedAt,
+      });
+    } catch (error) {
+      console.error("Error fetching custom S3 credentials:", error);
+      res.status(500).json({ error: "Failed to fetch custom S3 credentials" });
+    }
+  });
+
+  // Save user's custom S3 credentials
+  app.post("/api/storage/custom-s3", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Check if user is Pro
+      const user = await authStorage.getUser(userId);
+      if (!user || (user.accountType !== "pro" && user.accountType !== "enterprise")) {
+        return res.status(403).json({ error: "Custom S3 storage is a Pro feature" });
+      }
+
+      const { endpoint, bucket, accessKeyId, secretAccessKey, region, prefix, label } = req.body;
+      
+      if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+        return res.status(400).json({ error: "Endpoint, bucket, access key ID, and secret access key are required" });
+      }
+
+      const { encryptToken } = await import("./services/externalStorage");
+
+      await authStorage.saveUserS3Credentials({
+        userId,
+        endpointEncrypted: encryptToken(endpoint, userId),
+        bucketEncrypted: encryptToken(bucket, userId),
+        accessKeyIdEncrypted: encryptToken(accessKeyId, userId),
+        secretAccessKeyEncrypted: encryptToken(secretAccessKey, userId),
+        region: region || "auto",
+        prefix: prefix || null,
+        label: label || null,
+        isActive: true,
+        lastTestedAt: null,
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error saving custom S3 credentials:", error);
+      res.status(500).json({ error: "Failed to save custom S3 credentials" });
+    }
+  });
+
+  // Test user's custom S3 credentials
+  app.post("/api/storage/custom-s3/test", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Check if user is Pro
+      const user = await authStorage.getUser(userId);
+      if (!user || (user.accountType !== "pro" && user.accountType !== "enterprise")) {
+        return res.status(403).json({ error: "Custom S3 storage is a Pro feature" });
+      }
+
+      const { endpoint, bucket, accessKeyId, secretAccessKey, region } = req.body;
+      
+      if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+        return res.status(400).json({ error: "All credentials are required for testing" });
+      }
+
+      // Test the connection
+      const { S3Client, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand } = await import("@aws-sdk/client-s3");
+      
+      const client = new S3Client({
+        endpoint,
+        region: region || "auto",
+        credentials: {
+          accessKeyId,
+          secretAccessKey,
+        },
+        forcePathStyle: true,
+      });
+
+      // Test list (read access)
+      try {
+        await client.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 1 }));
+      } catch (e: any) {
+        return res.status(400).json({ error: `Failed to list objects: ${e.message}` });
+      }
+
+      // Test upload (write access)
+      const testKey = `fairsign-test-${Date.now()}.txt`;
+      try {
+        await client.send(new PutObjectCommand({
+          Bucket: bucket,
+          Key: testKey,
+          Body: "FairSign connection test",
+          ContentType: "text/plain",
+        }));
+      } catch (e: any) {
+        return res.status(400).json({ error: `Failed to upload test file: ${e.message}` });
+      }
+
+      // Cleanup test file
+      try {
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: testKey }));
+      } catch (e) {
+        // Ignore delete errors
+      }
+
+      // Update last tested timestamp if credentials are saved
+      const existingCreds = await authStorage.getUserS3Credentials(userId);
+      if (existingCreds) {
+        await authStorage.updateUserS3LastTested(userId);
+      }
+
+      res.json({ success: true, message: "Connection test passed" });
+    } catch (error: any) {
+      console.error("Error testing custom S3 credentials:", error);
+      res.status(500).json({ error: `Connection test failed: ${error.message}` });
+    }
+  });
+
+  // Delete user's custom S3 credentials
+  app.delete("/api/storage/custom-s3", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      // Check if this is the current storage provider
+      const user = await authStorage.getUser(userId);
+      if (user?.storageProvider === "custom_s3") {
+        // Switch to fairsign before deleting
+        await authStorage.updateStorageProvider(userId, "fairsign");
+      }
+
+      await authStorage.deleteUserS3Credentials(userId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting custom S3 credentials:", error);
+      res.status(500).json({ error: "Failed to delete custom S3 credentials" });
     }
   });
 
@@ -2576,7 +3511,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Fields can only be added to PDF templates" });
       }
 
-      const { fields } = req.body;
+      const { fields, signerRoles } = req.body;
       if (!Array.isArray(fields)) {
         return res.status(400).json({ error: "Fields must be an array" });
       }
@@ -2608,9 +3543,13 @@ export async function registerRoutes(
         createdFields.push(created);
       }
 
-      // Update template placeholders based on fields
+      // Update template placeholders and signer roles
       const placeholders = createdFields.map(f => f.apiTag);
-      await storage.updateTemplate(templateId, { placeholders });
+      const updateData: any = { placeholders };
+      if (Array.isArray(signerRoles) && signerRoles.length > 0) {
+        updateData.signerRoles = signerRoles;
+      }
+      await storage.updateTemplate(templateId, updateData);
 
       res.json(createdFields);
     } catch (error) {
@@ -3117,6 +4056,682 @@ export async function registerRoutes(
     }
   });
 
+  // ===== EMBEDDED SIGNING API (Enterprise Feature) =====
+  
+  // Get allowed origins for embedded signing
+  app.get("/api/embedded/allowed-origins", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+      
+      const user = await authStorage.getUser(userId);
+      if (!user || user.accountType !== "enterprise") {
+        return res.status(403).json({
+          error: "Enterprise subscription required",
+          message: "Embedded signing is an Enterprise feature.",
+        });
+      }
+      
+      res.json({ allowedOrigins: user.allowedOrigins || [] });
+    } catch (error) {
+      console.error("Error fetching allowed origins:", error);
+      res.status(500).json({ error: "Failed to fetch allowed origins" });
+    }
+  });
+  
+  // Update allowed origins for embedded signing
+  app.put("/api/embedded/allowed-origins", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+      
+      const user = await authStorage.getUser(userId);
+      if (!user || user.accountType !== "enterprise") {
+        return res.status(403).json({
+          error: "Enterprise subscription required",
+          message: "Embedded signing is an Enterprise feature.",
+        });
+      }
+      
+      const { origins } = req.body;
+      if (!Array.isArray(origins)) {
+        return res.status(400).json({ error: "origins must be an array" });
+      }
+      
+      // Validate origins are valid URLs
+      const validOrigins: string[] = [];
+      for (const origin of origins) {
+        if (typeof origin !== "string") continue;
+        try {
+          const url = new URL(origin);
+          // Only allow https (or http for localhost)
+          if (url.protocol === "https:" || (url.protocol === "http:" && url.hostname === "localhost")) {
+            validOrigins.push(url.origin); // Normalize to origin only
+          }
+        } catch {
+          // Skip invalid URLs
+        }
+      }
+      
+      await authStorage.updateAllowedOrigins(userId, validOrigins);
+      res.json({ success: true, allowedOrigins: validOrigins });
+    } catch (error) {
+      console.error("Error updating allowed origins:", error);
+      res.status(500).json({ error: "Failed to update allowed origins" });
+    }
+  });
+  
+  // Create embedded signing session (silent - no email sent)
+  // Embedded signing API - uses feature access middleware for API quota tracking
+  app.post("/api/v1/embedded/sign-url", isAuthenticated, checkFeatureAccess("api_access"), async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+      
+      const user = await authStorage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      
+      const { template_id, signer_email, signer_name, redirect_url } = req.body;
+      
+      if (!template_id) {
+        return res.status(400).json({ error: "template_id is required" });
+      }
+      if (!signer_email) {
+        return res.status(400).json({ error: "signer_email is required" });
+      }
+      if (!signer_name) {
+        return res.status(400).json({ error: "signer_name is required" });
+      }
+      
+      // Fetch template - first try templates table, then documents table with is_template=true
+      console.log(`[Embedded] Looking up template_id: ${template_id} for userId: ${userId}`);
+      
+      let template = await storage.getTemplate(template_id);
+      let isDocumentAsTemplate = false;
+      
+      // If not found in templates table, check documents table for is_template=true records
+      if (!template) {
+        console.log(`[Embedded] Template not found in templates table, checking documents table...`);
+        const doc = await storage.getDocument(template_id);
+        console.log(`[Embedded] Document lookup result:`, doc ? { id: doc.id, isTemplate: (doc as any).isTemplate, userId: doc.userId, mimeType: (doc as any).mimeType } : 'not found');
+        
+        if (doc && (doc as any).isTemplate === true) {
+          // Convert document to template-like object for downstream compatibility
+          isDocumentAsTemplate = true;
+          template = {
+            id: doc.id,
+            userId: doc.userId,
+            name: (doc as any).title || 'Untitled',
+            templateType: 'pdf',
+            pdfKey: doc.unsignedPdfKey,
+            pdfStorageKey: doc.unsignedPdfKey,
+          } as any;
+          console.log(`[Embedded] Found document as template:`, template);
+        }
+      }
+      
+      if (!template) {
+        console.log(`[Embedded] Template not found in either table for id: ${template_id}`);
+        return res.status(404).json({ error: "Template not found" });
+      }
+      
+      // Check template ownership (allow null userId for shared templates)
+      console.log(`[Embedded] Checking ownership: template.userId=${template.userId}, requestUserId=${userId}`);
+      if (template.userId && template.userId !== userId) {
+        return res.status(403).json({ error: "Template not accessible" });
+      }
+      
+      // Check document usage limits
+      const usage = await authStorage.checkDocumentUsage(userId);
+      if (!usage.canCreate) {
+        return res.status(403).json({
+          error: "Document limit reached",
+          message: `You have used ${usage.used} of ${usage.limit} documents this month.`,
+        });
+      }
+      
+      // Download template PDF
+      let pdfBuffer: Buffer;
+      const pdfKey = template.pdfKey || template.pdfStorageKey;
+      console.log(`[Embedded] Template type: ${template.templateType}, pdfKey: ${pdfKey}`);
+      
+      if (template.templateType === "pdf" && pdfKey) {
+        pdfBuffer = await objectStorage.downloadBuffer(pdfKey);
+      } else {
+        console.log(`[Embedded] PDF download failed - templateType: ${template.templateType}, pdfKey: ${pdfKey}`);
+        return res.status(400).json({ error: "Only PDF templates are supported for embedded signing" });
+      }
+      
+      // Calculate original document hash
+      const originalHash = createHash("sha256").update(pdfBuffer).digest("hex");
+      
+      // Get storage context
+      const storageContext = await resolveDocumentStorageContext(userId);
+      
+      // Upload PDF
+      const unsignedPdfKey = `documents/${nanoid()}/unsigned.pdf`;
+      await storageContext.backend.uploadBuffer(pdfBuffer, unsignedPdfKey, "application/pdf");
+      
+      // Generate signing token
+      const signingToken = nanoid(32);
+      
+      // Create signer record
+      const signerId = nanoid();
+      const signerToken = nanoid(32);
+      const signers = [{
+        id: signerId,
+        name: signer_name,
+        email: signer_email,
+        role: "signer",
+        token: signerToken,
+      }];
+      
+      // Get template fields
+      const templateFields = await storage.getTemplateFields(template_id);
+      
+      // Build fields for document
+      const fields = templateFields.map(field => ({
+        id: field.id,
+        signerId,
+        fieldType: field.fieldType,
+        page: field.page,
+        x: field.x,
+        y: field.y,
+        width: field.width,
+        height: field.height,
+        required: field.required,
+        apiTag: field.apiTag,
+      }));
+      
+      // Create document
+      const document = await storage.createDocument({
+        templateId: template_id,
+        title: template.name,
+        isTemplate: false,
+        mimeType: "application/pdf",
+        unsignedPdfKey,
+        originalHash,
+        status: "pending",
+        signingToken,
+        userId,
+        storageBucket: storageContext.storageBucket,
+        storageRegion: storageContext.storageRegion,
+        dataJson: {
+          embeddedSigning: true,
+          oneOffDocument: true,
+          title: template.name,
+          signers,
+          fields,
+          redirectUrl: redirect_url,
+        },
+      });
+      
+      // Log audit event
+      await logAuditEvent(document.id, "embedded_session_created", req, { 
+        template_id, 
+        signer_email,
+        userId,
+      });
+      
+      // Increment document count
+      await authStorage.incrementDocumentCount(userId);
+      
+      const baseUrl = process.env.BASE_URL || `https://${req.headers.host}`;
+      const signingUrl = `${baseUrl}/d/${document.id}?token=${signerToken}`;
+      
+      console.log(`[Embedded] Document created: ${document.id} for ${signer_email}`);
+      
+      // Return URL without sending email (silent creation)
+      res.status(201).json({
+        url: signingUrl,
+        document_id: document.id,
+        expires_in: 86400 * 7, // 7 days in seconds
+      });
+    } catch (error) {
+      console.error("[Embedded] Error creating sign URL:", error);
+      res.status(500).json({ error: "Failed to create embedded signing session" });
+    }
+  });
+
+  // ===== BULK SEND ROUTES =====
+
+  // Step 1: Prepare bulk send - upload PDF and CSV, create draft batch (Enterprise only)
+  app.post(
+    "/api/bulk-send/prepare",
+    isAuthenticated,
+    checkFeatureAccess("bulk_send"),
+    upload.fields([
+      { name: "pdf", maxCount: 1 },
+      { name: "csv", maxCount: 1 },
+    ]),
+    async (req: Request, res: Response) => {
+      try {
+        const userId = (req.user as any)?.id;
+        if (!userId) {
+          return res.status(401).json({ error: "User not authenticated" });
+        }
+
+        const user = await authStorage.getUser(userId);
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+        const pdfFile = files.pdf?.[0];
+        const csvFile = files.csv?.[0];
+
+        if (!pdfFile) {
+          return res.status(400).json({ error: "PDF file is required" });
+        }
+        if (!csvFile) {
+          return res.status(400).json({ error: "CSV file is required" });
+        }
+
+        const title = req.body.title || pdfFile.originalname.replace(/\.pdf$/i, "") || "Bulk Document";
+
+        // Parse CSV
+        const Papa = await import("papaparse");
+        const csvContent = csvFile.buffer.toString("utf-8");
+        const parseResult = Papa.default.parse<{ name: string; email: string }>(csvContent, {
+          header: true,
+          skipEmptyLines: true,
+        });
+
+        if (parseResult.errors.length > 0) {
+          return res.status(400).json({
+            error: "CSV parsing error",
+            details: parseResult.errors.slice(0, 5),
+          });
+        }
+
+        const recipients = parseResult.data.filter(
+          (row) => row.name && row.email && row.email.includes("@")
+        );
+
+        if (recipients.length === 0) {
+          return res.status(400).json({
+            error: "No valid recipients found in CSV",
+            message: "CSV must have 'name' and 'email' columns with valid data.",
+          });
+        }
+
+        // Upload PDF to object storage
+        const privateDir = objectStorage.getPrivateObjectDir();
+        const pdfStorageKey = `bulk/${nanoid()}/template.pdf`;
+        const fullPdfPath = joinStoragePath(privateDir, pdfStorageKey);
+        await objectStorage.uploadBuffer(pdfFile.buffer, fullPdfPath, "application/pdf");
+
+        // Create draft batch (not processing yet - awaiting field configuration)
+        const batch = await storage.createBulkBatch({
+          userId,
+          originalFilename: pdfFile.originalname,
+          title,
+          pdfStorageKey: fullPdfPath,
+          status: "draft",
+        });
+
+        // Create items for each recipient
+        const items = recipients.map((recipient) => ({
+          batchId: batch.id,
+          recipientName: recipient.name,
+          recipientEmail: recipient.email,
+          status: "pending" as const,
+          errorMessage: null,
+          envelopeId: null,
+        }));
+
+        await storage.createBulkItems(items);
+
+        console.log(`[BulkSend] Created draft batch ${batch.id} with ${recipients.length} recipients`);
+
+        res.status(201).json({
+          batchId: batch.id,
+          recipientCount: recipients.length,
+          status: "draft",
+          message: `Draft created with ${recipients.length} recipients. Configure signature fields and send.`,
+        });
+      } catch (error) {
+        console.error("Error creating bulk send draft:", error);
+        res.status(500).json({ error: "Failed to create bulk send draft" });
+      }
+    }
+  );
+
+  // Get PDF for a draft batch (for field editor preview)
+  app.get(
+    "/api/bulk-batches/:id/pdf",
+    isAuthenticated,
+    async (req: Request, res: Response) => {
+      try {
+        const userId = (req.user as any)?.id;
+        if (!userId) {
+          return res.status(401).json({ error: "User not authenticated" });
+        }
+
+        const batch = await storage.getBulkBatch(req.params.id);
+        if (!batch) {
+          return res.status(404).json({ error: "Batch not found" });
+        }
+
+        if (batch.userId !== userId) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+
+        const pdfBuffer = await objectStorage.downloadBuffer(batch.pdfStorageKey);
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename="${batch.originalFilename}"`);
+        res.send(pdfBuffer);
+      } catch (error) {
+        console.error("Error fetching batch PDF:", error);
+        res.status(500).json({ error: "Failed to fetch PDF" });
+      }
+    }
+  );
+
+  // Step 2: Send bulk batch - save fields and start processing
+  app.post(
+    "/api/bulk-batches/:id/send",
+    isAuthenticated,
+    checkFeatureAccess("bulk_send"),
+    async (req: Request, res: Response) => {
+      try {
+        const userId = (req.user as any)?.id;
+        if (!userId) {
+          return res.status(401).json({ error: "User not authenticated" });
+        }
+
+        const batch = await storage.getBulkBatch(req.params.id);
+        if (!batch) {
+          return res.status(404).json({ error: "Batch not found" });
+        }
+
+        if (batch.userId !== userId) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+
+        if (batch.status !== "draft") {
+          return res.status(400).json({ error: "Batch has already been sent" });
+        }
+
+        const { fields } = req.body;
+        
+        // Validate that at least one signature field is defined
+        if (!fields || !Array.isArray(fields) || fields.length === 0) {
+          return res.status(400).json({ 
+            error: "At least one signature field is required",
+            message: "Please place at least one signature field on the document before sending.",
+          });
+        }
+
+        const signatureFields = fields.filter((f: any) => f.fieldType === "signature");
+        if (signatureFields.length === 0) {
+          return res.status(400).json({ 
+            error: "At least one signature field is required",
+            message: "Please add a signature field so recipients know where to sign.",
+          });
+        }
+
+        // Update batch with field definitions and set to processing
+        await storage.updateBulkBatch(batch.id, { 
+          fieldsJson: fields,
+          status: "processing",
+        });
+
+        console.log(`[BulkSend] Starting batch ${batch.id} with ${fields.length} fields`);
+
+        // Trigger background processing asynchronously
+        setImmediate(async () => {
+          try {
+            const { processBulkBatch } = await import("./services/bulkProcessor");
+            await processBulkBatch(batch.id);
+          } catch (error) {
+            console.error(`[BulkSend] Error processing batch ${batch.id}:`, error);
+          }
+        });
+
+        const items = await storage.getBulkItems(batch.id);
+
+        res.json({
+          batchId: batch.id,
+          recipientCount: items.length,
+          status: "processing",
+          message: `Sending to ${items.length} recipients. Processing started.`,
+        });
+      } catch (error) {
+        console.error("Error sending bulk batch:", error);
+        res.status(500).json({ error: "Failed to send bulk batch" });
+      }
+    }
+  );
+
+  // Legacy endpoint for backward compatibility - redirects to prepare flow
+  app.post(
+    "/api/bulk-send",
+    isAuthenticated,
+    checkFeatureAccess("bulk_send"),
+    upload.fields([
+      { name: "pdf", maxCount: 1 },
+      { name: "csv", maxCount: 1 },
+    ]),
+    async (req: Request, res: Response) => {
+      // Redirect to the new prepare endpoint
+      return res.status(400).json({
+        error: "Bulk send workflow updated",
+        message: "Please use the new bulk send flow: 1) POST /api/bulk-send/prepare, 2) Configure fields, 3) POST /api/bulk-batches/:id/send",
+      });
+    }
+  );
+
+  // Get bulk send batches for the current user
+  app.get("/api/bulk-batches", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const batches = await storage.getBulkBatchesByUser(userId);
+
+      // Get item counts for each batch
+      const batchesWithStats = await Promise.all(
+        batches.map(async (batch) => {
+          const items = await storage.getBulkItems(batch.id);
+          const sentCount = items.filter((i) => i.status === "sent").length;
+          const errorCount = items.filter((i) => i.status === "error").length;
+          const pendingCount = items.filter((i) => i.status === "pending").length;
+          return {
+            ...batch,
+            totalCount: items.length,
+            sentCount,
+            errorCount,
+            pendingCount,
+          };
+        })
+      );
+
+      res.json(batchesWithStats);
+    } catch (error) {
+      console.error("Error fetching bulk batches:", error);
+      res.status(500).json({ error: "Failed to fetch bulk batches" });
+    }
+  });
+
+  // Get details of a specific batch with its items
+  app.get("/api/bulk-batches/:id", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = (req.user as any)?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const batchId = req.params.id;
+      const batch = await storage.getBulkBatch(batchId);
+
+      if (!batch) {
+        return res.status(404).json({ error: "Batch not found" });
+      }
+
+      if (batch.userId !== userId) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const items = await storage.getBulkItems(batchId);
+
+      res.json({
+        ...batch,
+        items,
+        totalCount: items.length,
+        sentCount: items.filter((i) => i.status === "sent").length,
+        errorCount: items.filter((i) => i.status === "error").length,
+        pendingCount: items.filter((i) => i.status === "pending").length,
+      });
+    } catch (error) {
+      console.error("Error fetching bulk batch details:", error);
+      res.status(500).json({ error: "Failed to fetch batch details" });
+    }
+  });
+
+  // ===== USER GUIDES ROUTES =====
+  
+  // Public routes for logged-in users - get published guides
+  app.get("/api/guides", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const guides = await storage.getPublishedUserGuides();
+      res.json(guides);
+    } catch (error) {
+      console.error("Error fetching guides:", error);
+      res.status(500).json({ error: "Failed to fetch guides" });
+    }
+  });
+
+  app.get("/api/guides/:slug", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const guide = await storage.getUserGuideBySlug(req.params.slug);
+      if (!guide) {
+        return res.status(404).json({ error: "Guide not found" });
+      }
+      if (!guide.published) {
+        return res.status(404).json({ error: "Guide not found" });
+      }
+      res.json(guide);
+    } catch (error) {
+      console.error("Error fetching guide:", error);
+      res.status(500).json({ error: "Failed to fetch guide" });
+    }
+  });
+
+  // Admin routes for managing guides
+  app.get("/api/admin/guides", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user?.isAdmin) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      const guides = await storage.getAllUserGuides();
+      res.json(guides);
+    } catch (error) {
+      console.error("Error fetching admin guides:", error);
+      res.status(500).json({ error: "Failed to fetch guides" });
+    }
+  });
+
+  app.post("/api/admin/guides", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user?.isAdmin) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const { title, slug, content, sortOrder, published } = req.body;
+      
+      if (!title || !slug || !content) {
+        return res.status(400).json({ error: "Title, slug, and content are required" });
+      }
+
+      // Check for duplicate slug
+      const existing = await storage.getUserGuideBySlug(slug);
+      if (existing) {
+        return res.status(400).json({ error: "A guide with this slug already exists" });
+      }
+
+      const guide = await storage.createUserGuide({
+        title,
+        slug,
+        content,
+        sortOrder: sortOrder ?? 0,
+        published: published ?? true,
+      });
+      res.status(201).json(guide);
+    } catch (error) {
+      console.error("Error creating guide:", error);
+      res.status(500).json({ error: "Failed to create guide" });
+    }
+  });
+
+  app.patch("/api/admin/guides/:id", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user?.isAdmin) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const guide = await storage.getUserGuide(req.params.id);
+      if (!guide) {
+        return res.status(404).json({ error: "Guide not found" });
+      }
+
+      const { title, slug, content, sortOrder, published } = req.body;
+      
+      // Check for duplicate slug (if changing)
+      if (slug && slug !== guide.slug) {
+        const existing = await storage.getUserGuideBySlug(slug);
+        if (existing) {
+          return res.status(400).json({ error: "A guide with this slug already exists" });
+        }
+      }
+
+      const updated = await storage.updateUserGuide(req.params.id, {
+        ...(title !== undefined && { title }),
+        ...(slug !== undefined && { slug }),
+        ...(content !== undefined && { content }),
+        ...(sortOrder !== undefined && { sortOrder }),
+        ...(published !== undefined && { published }),
+      });
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating guide:", error);
+      res.status(500).json({ error: "Failed to update guide" });
+    }
+  });
+
+  app.delete("/api/admin/guides/:id", isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user?.isAdmin) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const guide = await storage.getUserGuide(req.params.id);
+      if (!guide) {
+        return res.status(404).json({ error: "Guide not found" });
+      }
+
+      await storage.deleteUserGuide(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting guide:", error);
+      res.status(500).json({ error: "Failed to delete guide" });
+    }
+  });
+
   return httpServer;
 }
 
@@ -3186,39 +4801,3 @@ async function seedSignatureSpots() {
   console.log("Signature spots seeded successfully");
 }
 
-// Seed default templates
-async function seedDefaultTemplates() {
-  const templateId = "lease_v1";
-  
-  // Check if template already exists
-  const existingTemplate = await storage.getTemplate(templateId);
-  if (existingTemplate) {
-    console.log("Default templates already seeded");
-    return;
-  }
-  
-  console.log("Seeding default templates...");
-  
-  // Read the lease_v1.html template
-  const fs = await import("fs");
-  const path = await import("path");
-  const templatePath = path.join(process.cwd(), "server", "templates", "lease_v1.html");
-  const htmlContent = fs.readFileSync(templatePath, "utf-8");
-  
-  // Extract placeholders
-  const placeholders = extractPlaceholders(htmlContent);
-  
-  // Create the default template (use createTemplateWithId for explicit ID)
-  await storage.createTemplateWithId({
-    id: templateId,
-    name: "Standard Lease Agreement",
-    description: "A comprehensive residential lease agreement template with all standard clauses.",
-    htmlContent,
-    placeholders,
-    isDefault: true,
-    userId: null,
-  });
-  
-  console.log(`Created default template: ${templateId}`);
-  console.log("Default templates seeded successfully");
-}

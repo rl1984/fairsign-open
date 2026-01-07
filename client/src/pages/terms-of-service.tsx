@@ -25,7 +25,7 @@ export default function TermsOfService() {
             <section>
               <h2 className="text-xl font-semibold mb-3">1. Introduction</h2>
               <p className="text-muted-foreground">
-                Welcome to FairSign ("we," "our," or "us"), a service provided by Twinlite Services Limited. 
+                Welcome to FairSign ("we," "our," or "us"), a service provided by Lannisport Limited. 
                 By accessing or using our website, API, or mobile applications (collectively, the "Service"), 
                 you agree to be bound by these Terms of Service ("Terms").
               </p>
@@ -35,7 +35,7 @@ export default function TermsOfService() {
               <div className="mt-4 p-4 bg-muted rounded-md">
                 <h3 className="font-medium mb-2">Company Information:</h3>
                 <ul className="text-sm text-muted-foreground space-y-1">
-                  <li><strong>Name:</strong> Twinlite Services Limited</li>
+                  <li><strong>Name:</strong> Lannisport Limited</li>
                   <li><strong>Registered Address:</strong> 4th Floor, Phibsborough Tower, Dublin, D07 XH2D, Republic of Ireland</li>
                   <li><strong>Phone:</strong> 018273662</li>
                   <li><strong>Contact Email:</strong> support@fairsign.io</li>
@@ -77,7 +77,7 @@ export default function TermsOfService() {
               </p>
               <p className="text-muted-foreground">
                 <strong>4.1. Our Role as Controller:</strong> For your account data (name, email, billing details, login credentials), 
-                Twinlite Services Limited acts as the Data Controller. We process this data to provide the Service, manage your account, 
+                Lannisport Limited acts as the Data Controller. We process this data to provide the Service, manage your account, 
                 and comply with legal obligations.
               </p>
               <p className="text-muted-foreground">
@@ -130,7 +130,7 @@ export default function TermsOfService() {
             <section>
               <h2 className="text-xl font-semibold mb-3">8. Intellectual Property</h2>
               <p className="text-muted-foreground">
-                <strong>8.1. Our IP:</strong> Twinlite Services Limited retains all rights, title, and interest in and to the 
+                <strong>8.1. Our IP:</strong> Lannisport Limited retains all rights, title, and interest in and to the 
                 FairSign platform, including source code, designs, logos, and software.
               </p>
               <p className="text-muted-foreground">
@@ -143,7 +143,7 @@ export default function TermsOfService() {
             <section>
               <h2 className="text-xl font-semibold mb-3">9. Limitation of Liability</h2>
               <p className="text-muted-foreground">
-                <strong>9.1.</strong> To the maximum extent permitted by applicable law, Twinlite Services Limited shall not be 
+                <strong>9.1.</strong> To the maximum extent permitted by applicable law, Lannisport Limited shall not be 
                 liable for any indirect, incidental, special, consequential, or punitive damages, or any loss of profits or revenues, 
                 whether incurred directly or indirectly, or any loss of data, use, goodwill, or other intangible losses.
               </p>
@@ -178,7 +178,7 @@ export default function TermsOfService() {
               <h2 className="text-xl font-semibold mb-3">12. Contact Us</h2>
               <p className="text-muted-foreground mb-2">If you have any questions about these Terms, please contact us:</p>
               <ul className="text-muted-foreground space-y-1">
-                <li><strong>By Post:</strong> Twinlite Services Limited, 4th Floor, Phibsborough Tower, Dublin, D07 XH2D</li>
+                <li><strong>By Post:</strong> Lannisport Limited, 4th Floor, Phibsborough Tower, Dublin, D07 XH2D</li>
                 <li><strong>By Phone:</strong> 018273662</li>
                 <li><strong>By Email:</strong> support@fairsign.io</li>
               </ul>

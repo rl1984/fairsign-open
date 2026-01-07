@@ -27,6 +27,10 @@ export interface AppInstance {
 
 export async function createApp(): Promise<AppInstance> {
   const app = express();
+  
+  // Trust proxy for Render/production load balancers - critical for secure session cookies
+  app.set('trust proxy', 1);
+  
   const httpServer = createServer(app);
 
   app.use(

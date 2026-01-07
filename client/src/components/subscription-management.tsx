@@ -4,10 +4,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Loader2, Crown, FileText, CreditCard, Check, Zap, Gift, Tag, CheckCircle, X } from "lucide-react";
+import { Loader2, Crown, FileText, CreditCard, Check, Zap, Gift, Tag, CheckCircle, X, Building2, Shield, Globe, Code2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 type BillingPeriod = "monthly" | "annual";
+type PlanType = "pro" | "enterprise";
 
 interface SubscriptionStatus {
   accountType: string;
@@ -30,6 +31,7 @@ export function SubscriptionManagement() {
   const [isUpgrading, setIsUpgrading] = useState(false);
   const [isManaging, setIsManaging] = useState(false);
   const [billingPeriod, setBillingPeriod] = useState<BillingPeriod>("annual");
+  const [enterpriseBillingPeriod, setEnterpriseBillingPeriod] = useState<BillingPeriod>("annual");
   const [promoCode, setPromoCode] = useState("");
   const [promoValidation, setPromoValidation] = useState<PromoValidation | null>(null);
   const [isValidating, setIsValidating] = useState(false);
@@ -49,6 +51,16 @@ export function SubscriptionManagement() {
       const res = await fetch(`/api/subscription/validate-promo?code=${encodeURIComponent(promoCode.toUpperCase())}`, {
         credentials: "include",
       });
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        setPromoValidation({ valid: false, error: "Promo codes are not available. Payment system may not be configured." });
+        toast({
+          title: "Promo codes unavailable",
+          description: "Payment system is not configured. Promo codes cannot be validated.",
+          variant: "destructive",
+        });
+        return;
+      }
       const data = await res.json();
       setPromoValidation(data);
       if (!data.valid) {
@@ -70,10 +82,13 @@ export function SubscriptionManagement() {
     setPromoValidation(null);
   };
 
-  const handleUpgrade = async (period: BillingPeriod = billingPeriod) => {
+  const handleUpgrade = async (period: BillingPeriod = billingPeriod, plan: PlanType = "pro") => {
     setIsUpgrading(true);
     try {
-      const body: { billingPeriod: string; promoCode?: string } = { billingPeriod: period };
+      const body: { billingPeriod: string; promoCode?: string; plan: string } = { 
+        billingPeriod: period,
+        plan 
+      };
       if (promoValidation?.valid && promoCode) {
         body.promoCode = promoCode.toUpperCase();
       }
@@ -145,7 +160,8 @@ export function SubscriptionManagement() {
     );
   }
 
-  const isPro = subscription?.accountType === "pro";
+  const isPro = subscription?.accountType === "pro" || subscription?.accountType === "enterprise";
+  const isEnterprise = subscription?.accountType === "enterprise";
   const documentsUsed = subscription?.documentsUsed ?? 0;
   const docsRemaining = Math.max(0, 5 - documentsUsed);
   const documentsRemaining = subscription ? 
@@ -162,8 +178,10 @@ export function SubscriptionManagement() {
                 <FileText className="h-5 w-5" />
                 Current Plan
               </CardTitle>
-              <Badge variant={isPro ? "default" : "secondary"} className="text-sm">
-                {isPro ? (
+              <Badge variant={isPro ? "default" : "secondary"} className={`text-sm ${isEnterprise ? "bg-purple-600" : ""}`}>
+                {isEnterprise ? (
+                  <><Building2 className="h-3 w-3 mr-1" /> Enterprise</>
+                ) : isPro ? (
                   <><Crown className="h-3 w-3 mr-1" /> Pro</>
                 ) : (
                   "Free"
@@ -171,7 +189,7 @@ export function SubscriptionManagement() {
               </Badge>
             </div>
             <CardDescription>
-              {isPro ? "Unlimited documents and all features" : "5 documents per month"}
+              {isEnterprise ? "All features including API access and bulk send" : isPro ? "Unlimited documents and all features" : "5 documents per month"}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -253,7 +271,16 @@ export function SubscriptionManagement() {
                 {billingPeriod === "monthly" ? (
                   <div>
                     <div className="flex items-baseline justify-center gap-1">
-                      <span className="text-4xl font-bold">€5</span>
+                      {promoValidation?.valid && promoValidation.percentOff ? (
+                        <>
+                          <span className="text-2xl line-through text-muted-foreground">€5</span>
+                          <span className="text-4xl font-bold text-green-600">
+                            €{(5 * (1 - promoValidation.percentOff / 100)).toFixed(2)}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-4xl font-bold">€5</span>
+                      )}
                       <span className="text-muted-foreground">/month</span>
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">Billed monthly</p>
@@ -267,7 +294,16 @@ export function SubscriptionManagement() {
                       </Badge>
                     </div>
                     <div className="flex items-baseline justify-center gap-1">
-                      <span className="text-4xl font-bold">€55</span>
+                      {promoValidation?.valid && promoValidation.percentOff ? (
+                        <>
+                          <span className="text-2xl line-through text-muted-foreground">€55</span>
+                          <span className="text-4xl font-bold text-green-600">
+                            €{(55 * (1 - promoValidation.percentOff / 100)).toFixed(2)}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-4xl font-bold">€55</span>
+                      )}
                       <span className="text-muted-foreground">/year</span>
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
@@ -368,15 +404,123 @@ export function SubscriptionManagement() {
           </Card>
         )}
 
-        {isPro && (
+        {!isEnterprise && (
+          <Card className="border-purple-500/50 bg-gradient-to-br from-purple-500/5 to-purple-500/10">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Building2 className="h-5 w-5 text-purple-600" />
+                Upgrade to Enterprise
+              </CardTitle>
+              <CardDescription>
+                Unlock advanced features for your organization
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Billing Period Toggle */}
+              <div className="flex rounded-lg border p-1 bg-muted/50">
+                <button
+                  onClick={() => setEnterpriseBillingPeriod("monthly")}
+                  className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+                    enterpriseBillingPeriod === "monthly" 
+                      ? "bg-background shadow-sm" 
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  data-testid="button-enterprise-billing-monthly"
+                >
+                  Monthly
+                </button>
+                <button
+                  onClick={() => setEnterpriseBillingPeriod("annual")}
+                  className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+                    enterpriseBillingPeriod === "annual" 
+                      ? "bg-background shadow-sm" 
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  data-testid="button-enterprise-billing-annual"
+                >
+                  Annual
+                </button>
+              </div>
+
+              {/* Pricing Display */}
+              <div className="text-center py-2">
+                {enterpriseBillingPeriod === "monthly" ? (
+                  <div>
+                    <div className="flex items-baseline justify-center gap-1">
+                      <span className="text-4xl font-bold">€8</span>
+                      <span className="text-muted-foreground">/user/month</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1">Billed monthly</p>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="flex items-center justify-center gap-2 mb-1">
+                      <Badge variant="secondary" className="bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+                        <Gift className="h-3 w-3 mr-1" />
+                        2 Months Free
+                      </Badge>
+                    </div>
+                    <div className="flex items-baseline justify-center gap-1">
+                      <span className="text-4xl font-bold">€80</span>
+                      <span className="text-muted-foreground">/user/year</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      <span className="line-through">€96</span> - Save €16 per year
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <ul className="space-y-2">
+                <li className="flex items-center gap-2 text-sm">
+                  <Shield className="h-4 w-4 text-purple-500" />
+                  Identity Verification
+                </li>
+                <li className="flex items-center gap-2 text-sm">
+                  <FileText className="h-4 w-4 text-purple-500" />
+                  Bulk Send
+                </li>
+                <li className="flex items-center gap-2 text-sm">
+                  <Globe className="h-4 w-4 text-purple-500" />
+                  Data Residency (EU/US)
+                </li>
+                <li className="flex items-center gap-2 text-sm">
+                  <Code2 className="h-4 w-4 text-purple-500" />
+                  API Access (200 calls/month)
+                </li>
+                <li className="flex items-center gap-2 text-sm">
+                  <Zap className="h-4 w-4 text-purple-500" />
+                  Embedded Signing API
+                </li>
+              </ul>
+
+              <Button
+                className="w-full bg-purple-600 hover:bg-purple-700"
+                size="lg"
+                onClick={() => handleUpgrade(enterpriseBillingPeriod, "enterprise")}
+                disabled={isUpgrading}
+                data-testid="button-upgrade-enterprise"
+              >
+                {isUpgrading ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Building2 className="h-4 w-4 mr-2" />
+                )}
+                {enterpriseBillingPeriod === "annual" ? "Subscribe Annually" : "Subscribe Monthly"}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {isEnterprise && (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Crown className="h-5 w-5 text-primary" />
-                Pro Benefits
+                <Building2 className="h-5 w-5 text-purple-600" />
+                Enterprise Benefits
               </CardTitle>
               <CardDescription>
-                You're enjoying all premium features
+                You have access to all advanced features
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -387,23 +531,23 @@ export function SubscriptionManagement() {
                 </li>
                 <li className="flex items-center gap-2 text-sm">
                   <Check className="h-4 w-4 text-green-500" />
-                  No watermarks
+                  Identity Verification
                 </li>
                 <li className="flex items-center gap-2 text-sm">
                   <Check className="h-4 w-4 text-green-500" />
-                  Unlimited signers
+                  Bulk Send
                 </li>
                 <li className="flex items-center gap-2 text-sm">
                   <Check className="h-4 w-4 text-green-500" />
-                  Full audit trail
+                  Data Residency
                 </li>
                 <li className="flex items-center gap-2 text-sm">
                   <Check className="h-4 w-4 text-green-500" />
-                  Team collaboration
+                  API Access (200 calls/month)
                 </li>
                 <li className="flex items-center gap-2 text-sm">
                   <Check className="h-4 w-4 text-green-500" />
-                  Priority support
+                  Embedded Signing API
                 </li>
               </ul>
             </CardContent>

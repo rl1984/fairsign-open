@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/user-avatar";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -98,7 +98,7 @@ export default function TemplatesPage() {
       <header className="border-b bg-card sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <FileCode className="h-6 w-6 text-primary" />
+            <img src="/logo.png" alt="FairSign" className="h-8 w-8" />
             <div>
               <h1 className="text-lg font-semibold">Templates</h1>
               <p className="text-xs text-muted-foreground">Manage document templates</p>
@@ -117,12 +117,7 @@ export default function TemplatesPage() {
             </Button>
             {user && (
               <div className="flex items-center gap-2">
-                <Avatar className="h-8 w-8">
-                  <AvatarImage src={user.profileImageUrl || undefined} />
-                  <AvatarFallback>
-                    {user.firstName?.[0]}{user.lastName?.[0]}
-                  </AvatarFallback>
-                </Avatar>
+                <UserAvatar user={user} />
                 <span className="text-sm hidden sm:inline" data-testid="text-user-name">
                   {user.firstName} {user.lastName}
                 </span>

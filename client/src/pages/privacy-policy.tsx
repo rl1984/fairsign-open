@@ -25,23 +25,23 @@ export default function PrivacyPolicy() {
             <section>
               <h2 className="text-xl font-semibold mb-3">1. Introduction</h2>
               <p className="text-muted-foreground">
-                Twinlite Services Limited ("we," "us," or "our") is committed to protecting your privacy. 
+                Lannisport Limited ("we," "us," or "our") is committed to protecting your privacy. 
                 This Privacy Policy explains how we collect, use, and store personal data when you use the 
                 FairSign electronic signature platform (the "Service").
               </p>
               <div className="mt-4 p-4 bg-muted rounded-md">
                 <h3 className="font-medium mb-2">Important Notice for Self-Hosted Users:</h3>
                 <p className="text-sm text-muted-foreground">
-                  This policy applies only to the hosted version of FairSign provided by Twinlite Services Limited 
+                  This policy applies only to the hosted version of FairSign provided by Lannisport Limited 
                   (e.g., at fairsign.app or your custom domain). If you are using a self-hosted instance of our 
-                  Open Source software on your own infrastructure, Twinlite Services Limited does not have access 
+                  Open Source software on your own infrastructure, Lannisport Limited does not have access 
                   to your data, and the entity hosting that instance is the sole Data Controller.
                 </p>
               </div>
               <div className="mt-4 p-4 bg-muted rounded-md">
                 <h3 className="font-medium mb-2">Company Information (Data Controller):</h3>
                 <ul className="text-sm text-muted-foreground space-y-1">
-                  <li><strong>Name:</strong> Twinlite Services Limited</li>
+                  <li><strong>Name:</strong> Lannisport Limited</li>
                   <li><strong>Address:</strong> 4th Floor, Phibsborough Tower, Dublin, D07 XH2D, Republic of Ireland</li>
                   <li><strong>Phone:</strong> 018273662</li>
                   <li><strong>Email:</strong> support@fairsign.io</li>

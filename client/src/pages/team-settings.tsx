@@ -4,9 +4,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Users, UserPlus, Crown, Trash2, LogOut, Mail, Clock, Copy } from "lucide-react";
+import { ArrowLeft, Users, UserPlus, Crown, Trash2, LogOut, Mail, Clock, Copy, Shield, Lock } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useState } from "react";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -57,6 +58,8 @@ interface TeamData {
     name: string;
     seatCount: number;
     createdAt: string;
+    ssoEnforced?: boolean;
+    ssoProviderSettings?: Record<string, unknown>;
   };
   members?: TeamMember[];
   pendingInvitations?: PendingInvitation[];
@@ -208,6 +211,37 @@ export default function TeamSettingsPage() {
     },
   });
 
+  const updateSsoSettingsMutation = useMutation({
+    mutationFn: async (data: { ssoEnforced: boolean }) => {
+      const response = await apiRequest("PATCH", "/api/team/sso-settings", data);
+      const responseData = await response.json().catch(() => ({ error: "Failed to parse response" }));
+      if (!response.ok) {
+        const errorMessage = responseData.details 
+          ? responseData.details.map((d: { message: string }) => d.message).join(", ")
+          : responseData.error || responseData.message || "Failed to update SSO settings";
+        throw new Error(errorMessage);
+      }
+      return responseData as { success: boolean; ssoEnforced: boolean; ssoProviderSettings?: Record<string, unknown> };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/team"] });
+      toast({
+        title: "SSO Settings Updated",
+        description: data.ssoEnforced 
+          ? "SSO is now enforced for team members." 
+          : "SSO enforcement has been disabled.",
+      });
+    },
+    onError: (error: Error) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/team"] });
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const copyInviteLink = () => {
     if (lastInviteLink) {
       navigator.clipboard.writeText(lastInviteLink);
@@ -226,9 +260,9 @@ export default function TeamSettingsPage() {
     );
   }
 
-  const isPro = authUser?.accountType === "pro";
+  const isProOrHigher = authUser?.accountType === "pro" || authUser?.accountType === "enterprise" || authUser?.accountType === "org";
 
-  if (!isPro) {
+  if (!isProOrHigher) {
     return (
       <div className="min-h-screen bg-background">
         <div className="container max-w-4xl mx-auto py-8 px-4">
@@ -252,12 +286,12 @@ export default function TeamSettingsPage() {
             <CardContent className="space-y-4">
               <div className="text-center py-8">
                 <Users className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                <h3 className="text-lg font-semibold mb-2">Team Features are Pro Only</h3>
+                <h3 className="text-lg font-semibold mb-2">Team Features Require Pro or Enterprise</h3>
                 <p className="text-muted-foreground mb-4">
-                  Upgrade to Pro to invite team members and share your document workspace.
+                  Upgrade to Pro or Enterprise to invite team members and share your document workspace.
                 </p>
                 <Link href="/dashboard?upgrade=true">
-                  <Button data-testid="button-upgrade-pro">Upgrade to Pro</Button>
+                  <Button data-testid="button-upgrade-pro">Upgrade Now</Button>
                 </Link>
               </div>
             </CardContent>
@@ -445,6 +479,68 @@ export default function TeamSettingsPage() {
               </p>
             </CardContent>
           </Card>
+
+          {/* SSO & Security Settings Card */}
+          {teamData?.hasTeam && teamData.isOwner && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Shield className="h-5 w-5" />
+                  SSO & Security
+                </CardTitle>
+                <CardDescription>
+                  Manage single sign-on settings for your organization
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {(teamData.accountType === "enterprise" || teamData.accountType === "org") ? (
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-md bg-muted/50">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium">Enforce SSO for Team Members</div>
+                        <p className="text-sm text-muted-foreground">
+                          When enabled, team members must sign in using SSO (Google or Microsoft). 
+                          Password-based login will be disabled for all members except the owner.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={teamData.organization?.ssoEnforced ?? false}
+                        onCheckedChange={(checked) => {
+                          updateSsoSettingsMutation.mutate({ ssoEnforced: checked });
+                        }}
+                        disabled={updateSsoSettingsMutation.isPending}
+                        data-testid="switch-sso-enforced"
+                      />
+                    </div>
+                    {teamData.organization?.ssoEnforced && (
+                      <div className="p-3 rounded-md border border-yellow-500/20 bg-yellow-500/10">
+                        <p className="text-sm text-yellow-700 dark:text-yellow-400">
+                          SSO is enforced. Team members can only sign in using Google or Microsoft accounts.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-4 p-4 rounded-md bg-muted/50">
+                    <Lock className="h-8 w-8 text-muted-foreground flex-shrink-0" />
+                    <div>
+                      <div className="font-medium">Enterprise Feature</div>
+                      <p className="text-sm text-muted-foreground mb-2">
+                        SSO management is available for Enterprise and Org plans. 
+                        Upgrade to enforce SSO for your team members.
+                      </p>
+                      <Link href="/dashboard?upgrade=true">
+                        <Button size="sm" data-testid="button-upgrade-sso">
+                          Upgrade to Enterprise
+                        </Button>
+                      </Link>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
         </div>
       </div>
 

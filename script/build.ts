@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile } from "fs/promises";
+import { rm, readFile, access } from "fs/promises";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -32,6 +32,15 @@ const allowlist = [
   "zod-validation-error",
 ];
 
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function buildAll() {
   await rm("dist", { recursive: true, force: true });
 
@@ -46,8 +55,17 @@ async function buildAll() {
   ];
   const externals = allDeps.filter((dep) => !allowlist.includes(dep));
 
+  // Determine entry point: use EE version if available, otherwise OSS
+  const eeEntryPoint = "src/index-ee.ts";
+  const ossEntryPoint = "server/index.ts";
+  
+  const useEE = await fileExists(eeEntryPoint);
+  const entryPoint = useEE ? eeEntryPoint : ossEntryPoint;
+  
+  console.log(`using entry point: ${entryPoint} (${useEE ? "Enterprise Edition" : "Open Source Edition"})`);
+
   await esbuild({
-    entryPoints: ["server/index.ts"],
+    entryPoints: [entryPoint],
     platform: "node",
     bundle: true,
     format: "cjs",
