@@ -875,10 +875,10 @@ export async function registerRoutes(
       try {
         const document = (req as any).document;
         const signer = (req as any).signer;
-        const { spotKey, value } = req.body;
+        const { spotKey, value, apiTag } = req.body;
 
-        if (!spotKey || value === undefined) {
-          return res.status(400).json({ error: "spotKey and value are required" });
+        if ((!spotKey && !apiTag) || value === undefined) {
+          return res.status(400).json({ error: "spotKey (or apiTag) and value are required" });
         }
 
         if (document.status === "completed") {
@@ -887,34 +887,57 @@ export async function registerRoutes(
 
         // Verify spot exists and is a text/date/checkbox field
         const docData = document.dataJson as Record<string, any> | null;
-        
-        if (!docData?.oneOffDocument || !docData.fields) {
-          return res.status(400).json({ error: "Text fields are only supported for one-off documents" });
-        }
+        let field: { id: string; signerId?: string; fieldType: string; apiTag?: string } | undefined;
+        let effectiveSpotKey = spotKey;
 
-        const field = (docData.fields as Array<{ id: string; signerId: string; fieldType: string }>)
-          .find(f => f.id === spotKey);
+        // Strategy 1: One-off document fields
+        if (docData?.oneOffDocument && docData.fields) {
+          if (spotKey) {
+            field = (docData.fields as any[]).find(f => f.id === spotKey);
+          } else if (apiTag) {
+            field = (docData.fields as any[]).find(f => f.apiTag === apiTag);
+            if (field) effectiveSpotKey = field.id;
+          }
+        } 
+        
+        // Strategy 2: Template fields (from DB) if not found yet
+        if (!field && document.templateId) {
+          const templateFields = await storage.getTemplateFields(document.templateId);
+          if (spotKey) {
+            // Note: templateFields use 'id' as the unique identifier which maps to spotKey
+            field = templateFields.find(f => f.id === spotKey);
+          } else if (apiTag) {
+            field = templateFields.find(f => f.apiTag === apiTag);
+            if (field) effectiveSpotKey = field.id;
+          }
+        }
         
         if (!field) {
-          return res.status(400).json({ error: "Invalid spotKey" });
+          return res.status(400).json({ error: "Invalid spotKey or apiTag" });
         }
+
+        // Map signerRole from template field (it might be called signerRole or signerId depending on source)
+        const fieldSignerRole = field.signerId || (field as any).signerRole;
 
         if (!["text", "date", "checkbox"].includes(field.fieldType)) {
           return res.status(400).json({ error: "This spot is not a text field" });
         }
 
         // Multi-signer: verify this signer is allowed to fill this field
-        if (signer && field.signerId !== signer.role) {
+        if (signer && fieldSignerRole && fieldSignerRole !== signer.role) {
           return res.status(403).json({ 
             error: "This field is not assigned to you",
             yourRole: signer.role,
-            fieldRole: field.signerId,
+            fieldRole: fieldSignerRole,
           });
         }
 
+        // Use the ID as the spotKey for storage consistency
+        if (!effectiveSpotKey) effectiveSpotKey = field.id;
+
         // Check if already filled
         const existingValues = await storage.getTextFieldValues(document.id);
-        const existing = existingValues.find(v => v.spotKey === spotKey);
+        const existing = existingValues.find(v => v.spotKey === effectiveSpotKey);
         if (existing) {
           return res.status(400).json({ error: "Value already submitted for this field" });
         }
@@ -922,7 +945,7 @@ export async function registerRoutes(
         // Create text field value record
         await storage.createTextFieldValue({
           documentId: document.id,
-          spotKey,
+          spotKey: effectiveSpotKey,
           value,
           fieldType: field.fieldType,
           signerRole: signer?.role || null,
@@ -931,15 +954,15 @@ export async function registerRoutes(
 
         // Log audit event
         await logAuditEvent(document.id, "text_field_submitted", req, { 
-          spotKey,
+          spotKey: effectiveSpotKey,
           fieldType: field.fieldType,
           signerEmail: signer?.email,
           signerRole: signer?.role,
         });
 
-        console.log(`Text field submitted: ${spotKey} for document ${document.id}${signer ? ` by ${signer.email}` : ""}`);
+        console.log(`Text field submitted: ${effectiveSpotKey} for document ${document.id}${signer ? ` by ${signer.email}` : ""}`);
 
-        res.status(201).json({ success: true, spotKey });
+        res.status(201).json({ success: true, spotKey: effectiveSpotKey });
       } catch (error) {
         console.error("Error submitting text field:", error);
         res.status(500).json({ error: "Failed to submit text field" });
@@ -1144,15 +1167,32 @@ export async function registerRoutes(
         }));
       } else {
         // Template-based: get from signature_spots table
-        allSpots = await storage.getSignatureSpots(document.templateId);
+        const signatureSpots = await storage.getSignatureSpots(document.templateId);
+        
+        // Also get template fields (text/date/checkbox) to support stamping them
+        const templateFields = await storage.getTemplateFields(document.templateId);
+        
+        // Map template fields to the spot format expected by stampSignaturesIntoPdf
+        const fieldSpots = templateFields.map(tf => ({
+          id: tf.id,
+          spotKey: tf.id, // Use ID as spotKey for consistency with text-field upload
+          page: tf.page,
+          x: Number(tf.x),
+          y: Number(tf.y),
+          w: Number(tf.width),
+          h: Number(tf.height),
+          kind: tf.fieldType,
+        }));
+        
+        allSpots = [...signatureSpots, ...fieldSpots];
       }
 
       const allAssets = await storage.getSignatureAssets(document.id);
       
-      // Get text field values for one-off documents
-      let textFieldValues: Array<{ spotKey: string; value: string; fieldType: string }> = [];
-      if (isOneOff) {
-        textFieldValues = await storage.getTextFieldValues(document.id);
+      // Get text field values for all documents (one-off AND template-based)
+      // We always fetch them because template-based docs can now have text updates too
+      let textFieldValues: Array<{ spotKey: string; value: string; fieldType: string }> = await storage.getTextFieldValues(document.id);
+      if (textFieldValues.length > 0) {
         console.log(`Found ${textFieldValues.length} text field values to stamp`);
       }
 
